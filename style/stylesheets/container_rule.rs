@@ -24,7 +24,7 @@ use crate::values::computed::{CSSPixelLength, ContainerType, Context, Ratio};
 use crate::values::specified::ContainerName;
 use crate::{derives::*, LocalName};
 use app_units::Au;
-use cssparser::{Parser, SourceLocation};
+use cssparser::{Parser, ParserInput, SourceLocation};
 use euclid::default::Size2D;
 #[cfg(feature = "gecko")]
 use malloc_size_of::{MallocSizeOfOps, MallocUnconditionalShallowSizeOf};
@@ -120,6 +120,30 @@ impl ContainerAttributeDependencyKind {
             name_kind == ContainerAttributeDependencyKind::NamedContainer
         });
         name_kind
+    }
+}
+
+impl ContainerConditions {
+    /// Parse a full @container rule prelude.
+    pub fn parse<'i>(
+        context: &ParserContext,
+        input: &mut Parser<'i, '_>,
+    ) -> Result<Self, ParseError<'i>> {
+        let conditions =
+            input.parse_comma_separated(|input| ContainerCondition::parse(context, input))?;
+        // Container rules must have at least one condition.
+        debug_assert!(!conditions.is_empty());
+        Ok(Self(ArcSlice::from_iter(conditions.into_iter())))
+    }
+
+    /// Parse and serialize a full @container rule prelude.
+    pub fn parse_to_css_string(context: &ParserContext, prelude: &str) -> Option<String> {
+        let mut input = ParserInput::new(prelude);
+        let mut input = Parser::new(&mut input);
+        let conditions = input
+            .parse_entirely(|input| Self::parse(context, input))
+            .ok()?;
+        Some(conditions.to_css_string())
     }
 }
 

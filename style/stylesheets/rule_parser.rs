@@ -427,8 +427,7 @@ impl<'a, 'i> AtRuleParser<'i> for TopLevelRuleParser<'a, 'i> {
                 let url =
                     CssUrl::new_from_untainted_string(url_string, &self.context, CorsMode::None);
 
-                let (layer, supports) =
-                    ImportRule::parse_layer_and_supports(input, &mut self.context);
+                let (layer, supports) = ImportRule::parse_layer_and_supports(input, &mut self.context)?;
 
                 let media = MediaList::parse(&mut self.context, input);
                 let media = Arc::new(self.shared_lock.wrap(media));

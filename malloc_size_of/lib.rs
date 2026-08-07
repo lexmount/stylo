@@ -716,7 +716,7 @@ where
             Component::AttributeOther(attr_selector) => attr_selector.size_of(ops),
             Component::Negation(components) => components.unconditional_size_of(ops),
             Component::NonTSPseudoClass(pseudo) => (*pseudo).size_of(ops),
-            Component::Slotted(selector) | Component::Host(Some(selector)) => {
+            Component::Slotted(selector) | Component::Host(Some(selector)) | Component::HostContext(selector) => {
                 selector.unconditional_size_of(ops)
             },
             Component::Is(list) | Component::Where(list) => list.unconditional_size_of(ops),

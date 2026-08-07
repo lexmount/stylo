@@ -284,11 +284,6 @@ pub trait Parser<'i> {
         false
     }
 
-    /// Whether to parse the selector list of nth-child() or nth-last-child().
-    fn parse_nth_child_of(&self) -> bool {
-        false
-    }
-
     /// Whether to parse `:is` and `:where` pseudo-classes.
     fn parse_is_and_where(&self) -> bool {
         false
@@ -1329,6 +1324,13 @@ impl<Impl: SelectorImpl> Selector<Impl> {
                     &mut flags,
                     forbidden_flags,
                 ))),
+                HostContext(ref selector) => HostContext(replace_parent_on_selector(
+                    selector,
+                    parent,
+                    &mut specificity,
+                    &mut flags,
+                    forbidden_flags,
+                )),
                 NthOf(ref data) => {
                     let selectors = replace_parent_on_selector_list(
                         data.selectors(),
@@ -2141,6 +2143,10 @@ pub enum Component<Impl: SelectorImpl> {
     ///
     /// See https://github.com/w3c/csswg-drafts/issues/2158
     Host(Option<Selector<Impl>>),
+    /// The `:host-context` pseudo-class:
+    ///
+    /// https://drafts.csswg.org/css-scoping/#host-selector
+    HostContext(Selector<Impl>),
     /// The `:where` pseudo-class.
     ///
     /// https://drafts.csswg.org/selectors/#zero-matches
@@ -2184,7 +2190,7 @@ impl<Impl: SelectorImpl> Component<Impl> {
     /// Returns true if this is a :host() selector.
     #[inline]
     pub fn is_host(&self) -> bool {
-        matches!(*self, Component::Host(..))
+        matches!(*self, Component::Host(..) | Component::HostContext(..))
     }
 
     /// Returns the value as a combinator if applicable, None otherwise.
@@ -2232,6 +2238,11 @@ impl<Impl: SelectorImpl> Component<Impl> {
                 }
             },
             Host(Some(ref selector)) => {
+                if !selector.visit(visitor) {
+                    return false;
+                }
+            },
+            HostContext(ref selector) => {
                 if !selector.visit(visitor) {
                     return false;
                 }
@@ -2663,6 +2674,11 @@ impl<Impl: SelectorImpl> ToCss for Component<Impl> {
                     dest.write_char(')')?;
                 }
                 Ok(())
+            },
+            HostContext(ref selector) => {
+                dest.write_str(":host-context(")?;
+                selector.to_css(dest)?;
+                dest.write_char(')')
             },
             Nth(ref nth_data) => {
                 nth_data.write_start(dest)?;
@@ -3375,7 +3391,9 @@ where
                     .intersects(SelectorParsingState::SKIP_DEFAULT_NAMESPACE)
                     || matches!(
                         result,
-                        SimpleSelectorParseResult::SimpleSelector(Component::Host(..))
+                        SimpleSelectorParseResult::SimpleSelector(
+                            Component::Host(..) | Component::HostContext(..)
+                        )
                     );
                 if !ignore_default_ns {
                     builder.push_simple_selector(Component::DefaultNamespace(url));
@@ -3506,6 +3524,12 @@ where
             }
             return Ok(Component::Host(Some(parse_inner_compound_selector(parser, input, state)?)));
         },
+        "host-context" if P::parse_host(parser) => {
+            if !state.allows_tree_structural_pseudo_classes() {
+                return Err(input.new_custom_error(SelectorParseErrorKind::InvalidState));
+            }
+            return Ok(Component::HostContext(parse_inner_compound_selector(parser, input, state)?));
+        },
         "not" => {
             return parse_negation(parser, input, state)
         },
@@ -3546,7 +3570,7 @@ where
         is_function: true,
         an_plus_b: AnPlusB(a, b),
     };
-    if !parser.parse_nth_child_of() || ty.is_of_type() {
+    if ty.is_of_type() {
         return Ok(Component::Nth(nth_data));
     }
 
@@ -3965,10 +3989,6 @@ pub mod tests {
             true
         }
 
-        fn parse_nth_child_of(&self) -> bool {
-            true
-        }
-
         fn parse_is_and_where(&self) -> bool {
             true
         }
@@ -4204,6 +4224,39 @@ pub mod tests {
             ParseRelative::No,
         );
         assert!(list.is_ok());
+    }
+
+    #[test]
+    fn test_host_context_parsing() {
+        let selector = Selector::from_vec(
+            vec![Component::HostContext(Selector::from_vec(
+                vec![Component::Class(DummyAtom::from("active"))],
+                specificity(0, 1, 0),
+                SelectorFlags::empty(),
+            ))],
+            specificity(0, 2, 0),
+            SelectorFlags::HAS_HOST,
+        );
+        assert_eq!(
+            parse(":host-context(.active)"),
+            Ok(SelectorList::from_vec(vec![selector.clone()]))
+        );
+        assert!(selector.matches_featureless_host(true).may_match());
+    }
+
+    #[test]
+    fn test_nth_child_of_selector_list_parses_without_opt_in() {
+        assert!(parse_expected(
+            "li:nth-child(odd of .foo)",
+            Some("li:nth-child(2n+1 of .foo)")
+        )
+        .is_ok());
+        assert!(parse_expected(
+            "li:nth-last-child(2n + 1 of :not(.foo))",
+            Some("li:nth-last-child(2n+1 of :not(.foo))")
+        )
+        .is_ok());
+        assert!(parse("li:nth-of-type(odd of .foo)").is_err());
     }
 
     const MATHML: &str = "http://www.w3.org/1998/Math/MathML";
@@ -4801,6 +4854,11 @@ pub mod tests {
         assert_eq!(combinator, Some(Combinator::PseudoElement));
         assert_eq!(iter.next(), None);
         assert_eq!(iter.next_sequence(), None);
+    }
+
+    #[test]
+    fn test_state_pseudo_on_element_backed_pseudo() {
+        assert!(parse("::details-content:hover").is_ok());
     }
 
     #[test]

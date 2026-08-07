@@ -860,6 +860,7 @@ fn specific_bucket_for<'a>(
                 Bucket::Universal
             }
         },
+        Component::HostContext(..) => Bucket::Universal,
         Component::Is(ref list) | Component::Where(ref list) => {
             if list.len() == 1 {
                 find_bucket(
