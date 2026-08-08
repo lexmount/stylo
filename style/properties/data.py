@@ -686,6 +686,7 @@ class Longhand(Property):
                 "MozScriptSizeMultiplier",
                 "TransformBox",
                 "TextDecorationSkipInk",
+                "TextDecorationSkipSpaces",
                 "OutlineStyle",
                 "Overflow",
                 "OverflowAnchor",
