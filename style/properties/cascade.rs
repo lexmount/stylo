@@ -2038,21 +2038,22 @@ impl<'a> Cascade<'a> {
         self.may_have_custom_property_cycles = true;
 
         for next in &refs.refs {
-            if !next.is_attr_with_type() || !self.seen.custom.attr.insert(&next.name) {
+            let Some(name) = next.name.as_static_name() else {
+                debug_assert_ne!(next.substitution_kind, SubstitutionFunctionKind::Attr);
+                continue;
+            };
+            if !next.is_attr_with_type() || !self.seen.custom.attr.insert(name) {
                 // Only type() can have nested references, so we don't need to eagerly look at
                 // others.
                 continue;
             }
             if let Ok(v) = get_attr_value_for_cycle_resolution(
-                &next.name,
+                name,
                 &next.attribute_data,
                 &value.url_data,
                 attribute_tracker,
             ) {
-                context
-                    .builder
-                    .substitution_functions
-                    .insert_attr(&next.name, v);
+                context.builder.substitution_functions.insert_attr(name, v);
             }
         }
     }
@@ -2268,7 +2269,7 @@ fn substitute_all(
         self_ref: &mut bool,
         attribute_tracker: &mut AttributeTracker,
         non_custom_references: &mut ReferenceFlags,
-    ) {
+    ) -> bool {
         // FIXME: Maybe avoid visiting the same var twice if not needed?
         let mut refs_stack = SmallVec::<[&References; 5]>::new();
         refs_stack.push(root);
@@ -2279,11 +2280,15 @@ fn substitute_all(
                     // env() doesn't reference custom properties, so it never participates in
                     // cycles; its fallback is used only when the environment doesn't provide
                     // the variable.
+                    let Some(name) = next.name.as_static_name() else {
+                        debug_assert!(false, "env() names must be static");
+                        if let Some(ref fallback) = next.fallback {
+                            refs_stack.push(&fallback.references);
+                        }
+                        continue;
+                    };
                     let device = context.stylist.device();
-                    let present = device
-                        .environment()
-                        .get(&next.name, device, url_data)
-                        .is_some();
+                    let present = device.environment().get(name, device, url_data).is_some();
                     if !present {
                         if let Some(ref fallback) = next.fallback {
                             refs_stack.push(&fallback.references);
@@ -2292,6 +2297,20 @@ fn substitute_all(
                     continue;
                 }
 
+                let resolved_name = match next.substitution_kind {
+                    SubstitutionFunctionKind::Var => {
+                        next.name.to_resolved_var_name(context.computed_context)
+                    },
+                    SubstitutionFunctionKind::Attr => next.name.as_static_name().cloned(),
+                    SubstitutionFunctionKind::Env => unreachable!("Handled above"),
+                };
+                let Some(resolved_name) = resolved_name else {
+                    if let Some(ref fallback) = next.fallback {
+                        refs_stack.push(&fallback.references);
+                    }
+                    continue;
+                };
+
                 let next_var = if next.substitution_kind == SubstitutionFunctionKind::Attr {
                     // An type()-less attr() within attr(... type()) can still have nested
                     // references.
@@ -2299,22 +2318,22 @@ fn substitute_all(
                     if !can_chain {
                         continue;
                     }
-                    if context.map().get_attr(&next.name).is_none() {
+                    if context.map().get_attr(&resolved_name).is_none() {
                         if let Ok(val) = get_attr_value_for_cycle_resolution(
-                            &next.name,
+                            &resolved_name,
                             &next.attribute_data,
                             url_data,
                             attribute_tracker,
                         ) {
-                            context.map_mut().insert_attr(&next.name, val);
+                            context.map_mut().insert_attr(&resolved_name, val);
                         }
                     }
-                    VarType::Attr(next.name.clone())
+                    VarType::Attr(resolved_name.clone())
                 } else {
-                    VarType::Custom(next.name.clone())
+                    VarType::Custom(resolved_name.clone())
                 };
 
-                visit_link(
+                if visit_link(
                     next_var,
                     index,
                     references_from_non_custom_properties,
@@ -2322,18 +2341,24 @@ fn substitute_all(
                     lowlink,
                     self_ref,
                     attribute_tracker,
-                );
+                ) {
+                    // Once this value is known to participate in a cycle it is invalid at
+                    // computed-value time. Later references cannot rescue it, and traversing
+                    // them can incorrectly pull fallback-only dependants into the same SCC.
+                    return true;
+                }
 
                 // Now that the primary reference has been resolved, classify it to
                 // decide whether its fallback is used.
                 let kind = next.substitution_kind;
                 let resolved = match kind {
                     SubstitutionFunctionKind::Var => {
-                        let registration =
-                            context.stylist.get_custom_property_registration(&next.name);
-                        context.map().get_var(registration, &next.name)
+                        let registration = context
+                            .stylist
+                            .get_custom_property_registration(&resolved_name);
+                        context.map().get_var(registration, &resolved_name)
                     },
-                    SubstitutionFunctionKind::Attr => context.map().get_attr(&next.name),
+                    SubstitutionFunctionKind::Attr => context.map().get_attr(&resolved_name),
                     SubstitutionFunctionKind::Env => unreachable!("Handled above"),
                 };
                 // The primary is guaranteed-invalid if it's absent from the map, or still
@@ -2356,6 +2381,7 @@ fn substitute_all(
                 }
             }
         }
+        false
     }
 
     /// Traverse a single dependency `var` of the variable at order index `index`, updating its
@@ -2368,12 +2394,12 @@ fn substitute_all(
         lowlink: &mut usize,
         self_ref: &mut bool,
         attr_tracker: &mut AttributeTracker,
-    ) {
+    ) -> bool {
         let next_index = match traverse(var, non_custom_references, context, attr_tracker) {
             Some(index) => index,
             // There is nothing to do if the next variable has been
             // fully resolved at this point.
-            None => return,
+            None => return false,
         };
         let next_info = &context.var_info[next_index];
         if next_index > index {
@@ -2381,13 +2407,17 @@ fn substitute_all(
             // must be inserted in the recursive call above. We want
             // to get its lowlink.
             *lowlink = cmp::min(*lowlink, next_info.lowlink);
+            return next_info.lowlink <= index;
         } else if next_index == index {
             *self_ref = true;
+            return true;
         } else if next_info.var.is_some() {
             // The next variable has a smaller order index and it is
             // in the stack, so we are at the same component.
             *lowlink = cmp::min(*lowlink, next_index);
+            return true;
         }
+        false
     }
 
     /// This function combines the traversal for cycle removal and value
@@ -2516,7 +2546,7 @@ fn substitute_all(
             );
 
             // Visit the references in this value...
-            visit_value_references(
+            let value_is_in_cycle = visit_value_references(
                 &var,
                 &v.references,
                 &v.url_data,
@@ -2532,9 +2562,9 @@ fn substitute_all(
             // ... Then the non-custom properties this value depends on (font-size, line-height,
             // color-scheme), as computed by `find_non_custom_references` above.
             let is_root = context.computed_context.is_root_element();
-            if registered && !value_non_custom_refs.is_empty() {
+            if !value_is_in_cycle && registered && !value_non_custom_refs.is_empty() {
                 value_non_custom_refs.for_each_non_custom(is_root, |r| {
-                    visit_link(
+                    let _ = visit_link(
                         VarType::NonCustom(r),
                         index,
                         references_from_non_custom_properties,
@@ -2556,7 +2586,7 @@ fn substitute_all(
             // TODO(emilio): I think the right fix for this is
             // s/SingleNonCustomReference/PrioritaryPropertyId in VarType::NonCustom.
             if non_custom == SingleNonCustomReference::LhUnits {
-                visit_link(
+                let _ = visit_link(
                     VarType::NonCustom(SingleNonCustomReference::FontUnits),
                     index,
                     references_from_non_custom_properties,
@@ -2576,7 +2606,7 @@ fn substitute_all(
                     // against the parent, see `find_non_custom_references`), they may chain to a
                     // registered property that does cycle back.
                     let value = &value.variable_value;
-                    visit_value_references(
+                    if visit_value_references(
                         &var,
                         &value.references,
                         &value.url_data,
@@ -2587,7 +2617,9 @@ fn substitute_all(
                         &mut self_ref,
                         attribute_tracker,
                         &mut Default::default(),
-                    );
+                    ) {
+                        break;
+                    }
                 }
             }
         }
