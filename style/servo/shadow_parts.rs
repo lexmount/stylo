@@ -200,7 +200,7 @@ mod tests {
             Some(("foo", "bar")),
             "First mapping should be in the list"
         );
-        // "totally-invalid-mapping" is not a valid mapping and should be ignored
+        // "totally invalid mapping" is not a valid mapping and should be ignored
         // "" is not valid (and consists of nothing but whitespace), so it should be ignored
         assert_eq!(mappings.next(), None, "No more mappings should exist");
     }
