@@ -262,6 +262,14 @@ impl Parse for Content {
                     ));
                 },
                 Token::Function(ref name) => {
+                    // CSS Content permits counter() and counters() after the alt marker.
+                    // Moli enables this grammar for native declarations and CSSOM serialization.
+                    // The resulting style values retain counter expressions; this parser does
+                    // not resolve them into accessible text. Embedders must resolve each
+                    // element's counter scope and refresh accessibility text when DOM, styles,
+                    // or counter values change.
+                    // TODO(moli): Validate downstream alt-counter evaluation and invalidation,
+                    // including Gecko consumers of this shared parser.
                     let result = match_ignore_ascii_case! { &name,
                         "counter" => input.parse_nested_block(|input| {
                             let name = CustomIdent::parse(input, &[])?;
