@@ -199,8 +199,8 @@ fn is_decimal(counter_type: &CounterStyle) -> bool {
 )]
 #[repr(C)]
 pub struct GenericContentItems<Image> {
-    /// The actual content items. Note that, past the alt marker, only some subset (strings,
-    /// attr(), counter())
+    /// The actual content items. Past the alt marker, only strings, attr(), counter(),
+    /// and counters() are allowed.
     pub items: thin_vec::ThinVec<GenericContentItem<Image>>,
     /// The index at which alt text starts, always non-zero. If equal to items.len(), no alt text
     /// exists.

@@ -262,16 +262,13 @@ impl Parse for Content {
                     ));
                 },
                 Token::Function(ref name) => {
-                    // FIXME(emilio): counter() / counters() should be valid per spec past
-                    // the alt marker, but it's likely non-trivial to support and other
-                    // browsers don't support it either, so restricting it for now.
                     let result = match_ignore_ascii_case! { &name,
-                        "counter" if alt_start.is_none() => input.parse_nested_block(|input| {
+                        "counter" => input.parse_nested_block(|input| {
                             let name = CustomIdent::parse(input, &[])?;
                             let style = Content::parse_counter_style(context, input);
                             Ok(generics::ContentItem::Counter(name, style))
                         }),
-                        "counters" if alt_start.is_none() => input.parse_nested_block(|input| {
+                        "counters" => input.parse_nested_block(|input| {
                             let name = CustomIdent::parse(input, &[])?;
                             input.expect_comma()?;
                             let separator = input.expect_string()?.as_ref().to_owned().into();
@@ -314,7 +311,7 @@ impl Parse for Content {
                 _ => return Err(ParseError::unexpected_token()),
             }
         }
-        if items.is_empty() {
+        if items.is_empty() || alt_start == Some(items.len()) {
             return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
         let alt_start = alt_start.unwrap_or(items.len());
@@ -322,5 +319,103 @@ impl Parse for Content {
             items,
             alt_start,
         }))
+    }
+}
+
+#[cfg(all(test, feature = "servo"))]
+mod tests {
+    use super::*;
+    use crate::context::QuirksMode;
+    use crate::custom_properties::AttrTaint;
+    use crate::stylesheets::{CssRuleType, Origin, UrlExtraData};
+    use cssparser::ParserInput;
+    use style_traits::ParsingMode;
+
+    fn parse_content(value: &str) -> Option<Content> {
+        static_prefs::set_pref!("layout.css.content.alt-text.enabled", true);
+        let url_data = UrlExtraData::from(url::Url::parse("https://example.com/").unwrap());
+        let context = ParserContext::new(
+            Origin::Author,
+            &url_data,
+            Some(CssRuleType::Style),
+            ParsingMode::DEFAULT,
+            QuirksMode::NoQuirks,
+            Default::default(),
+            None,
+            None,
+            AttrTaint::default(),
+        );
+        let mut input = ParserInput::new(value);
+        Parser::new(&mut input)
+            .parse_entirely(|input| Content::parse(&context, input))
+            .ok()
+    }
+
+    #[test]
+    fn content_alt_counters_parse_and_serialize() {
+        for (input, expected, main_count) in [
+            (
+                r#""Chapter " / "Chapter " counter(chapter)"#,
+                r#""Chapter " / "Chapter " counter(chapter)"#,
+                1,
+            ),
+            (
+                r#""main / label" / /* alt */ COUNTER(chapter, DECIMAL)"#,
+                r#""main / label" / counter(chapter)"#,
+                1,
+            ),
+            (
+                r#"counters(chapter, "/") " " / counters(chapter, "/", upper-roman)"#,
+                r#"counters(chapter, "/") " " / counters(chapter, "/", upper-roman)"#,
+                2,
+            ),
+            (
+                r#"url("https://example.com/icon.svg") / attr(data-label) counter(chapter)"#,
+                r#"url("https://example.com/icon.svg") / attr(data-label) counter(chapter)"#,
+                1,
+            ),
+            (
+                r#""label" / c\6f unter(chapter)"#,
+                r#""label" / counter(chapter)"#,
+                1,
+            ),
+            (r#""label" / """#, r#""label" / """#, 1),
+        ] {
+            let parsed = parse_content(input).unwrap_or_else(|| panic!("{input} should parse"));
+            let Content::Items(ref items) = parsed else {
+                panic!("{input} should produce content items");
+            };
+            assert_eq!(items.alt_start, main_count, "{input}");
+            assert!(items.items.len() > items.alt_start, "{input}");
+            assert_eq!(parsed.to_css_string(), expected, "{input}");
+            assert_eq!(parse_content(expected), Some(parsed), "{input}");
+        }
+    }
+
+    #[test]
+    fn content_alt_rejects_invalid_components_and_counter_arguments() {
+        for input in [
+            r#"none / counter(chapter)"#,
+            r#"normal / counter(chapter)"#,
+            r#"/ counter(chapter)"#,
+            r#""label" /"#,
+            r#""label" / /* empty alt */"#,
+            r#""label" / counter()"#,
+            r#""label" / counter(1)"#,
+            r#""label" / counter(chapter,)"#,
+            r#""label" / counter(chapter, decimal, extra)"#,
+            r#""label" / counters(chapter)"#,
+            r#""label" / counters(chapter, 1)"#,
+            r#""label" / attr() counter(chapter)"#,
+            r#""label" / url(alt.svg) counter(chapter)"#,
+            r#""label" / open-quote counter(chapter)"#,
+            r#""label" / close-quote counter(chapter)"#,
+            r#""label" / no-open-quote counter(chapter)"#,
+            r#""label" / no-close-quote counter(chapter)"#,
+            r#""label" / counter(chapter) / "extra""#,
+            r#""label" / counter(chapter) }"#,
+        ] {
+            assert!(parse_content(input).is_none(), "{input} should be invalid");
+        }
     }
 }
