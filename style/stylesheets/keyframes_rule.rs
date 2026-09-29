@@ -490,37 +490,6 @@ fn get_animated_properties(
 }
 
 impl KeyframesAnimation {
-    /// Return the declaration selected at the final animation offset for a
-    /// longhand, after keyframes with the same offset have been ordered.
-    ///
-    /// This intentionally returns no declaration when the final step uses the
-    /// underlying computed value. Callers can then use that underlying value
-    /// without re-parsing stylesheet text or reimplementing keyframe ordering.
-    pub fn final_declared_property<'a>(
-        &'a self,
-        guard: &'a SharedRwLockReadGuard,
-        property: LonghandId,
-    ) -> Option<&'a PropertyDeclaration> {
-        self.steps
-            .iter()
-            .rev()
-            .take_while(|step| step.start_offset.percentage.0 == 1.0)
-            .find_map(|step| match step.value {
-                KeyframesStepValue::Declarations { ref block } => block
-                    .read_with(guard)
-                    .get(PropertyDeclarationId::Longhand(property))
-                    .map(|(declaration, _)| declaration)
-                    .filter(|declaration| {
-                        !matches!(
-                            declaration,
-                            PropertyDeclaration::CSSWideKeyword(..)
-                                | PropertyDeclaration::WithVariables(..)
-                        )
-                    }),
-                KeyframesStepValue::ComputedValues => None,
-            })
-    }
-
     /// Create a keyframes animation from a given list of keyframes.
     ///
     /// This will return a keyframe animation with empty steps and

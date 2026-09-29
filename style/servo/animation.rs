@@ -28,6 +28,7 @@ use crate::stylesheets::layer_rule::LayerOrder;
 use crate::values::animated::{Animate, Procedure};
 use crate::values::computed::TimingFunction;
 use crate::values::generics::easing::BeforeFlag;
+use crate::values::generics::easing::TimingKeyword;
 use crate::values::specified::TransitionBehavior;
 use crate::Atom;
 use debug_unreachable::debug_unreachable;
@@ -518,6 +519,44 @@ impl ComputedKeyframe {
         }));
 
         computed_steps.into_boxed_slice()
+    }
+}
+
+/// Resolve the final opacity produced by an already-selected keyframes rule.
+///
+/// This uses the same keyframe grouping, variable substitution, underlying
+/// value synthesis, and computed-value conversion as running animations.
+/// Consumers can inspect a final static state without re-parsing stylesheet
+/// text or reproducing keyframe cascade order.
+pub fn final_keyframe_opacity<E>(
+    element: E,
+    animation: &KeyframesAnimation,
+    context: &SharedStyleContext,
+    base_style: &Arc<ComputedValues>,
+    resolver: &mut StyleResolverForElement<E>,
+) -> Option<f32>
+where
+    E: TElement,
+{
+    let opacity = PropertyDeclarationId::Longhand(LonghandId::Opacity);
+    if !animation.properties_changed.contains(opacity) {
+        return None;
+    }
+    let mut properties = PropertyDeclarationIdSet::default();
+    properties.insert(opacity);
+    let steps = ComputedKeyframe::generate_for_keyframes(
+        element,
+        animation,
+        context,
+        base_style,
+        TimingFunction::Keyword(TimingKeyword::Ease),
+        resolver,
+        properties,
+        1,
+    );
+    match steps.last()?.values.first()? {
+        AnimationValueOrReference::AnimationValue(AnimationValue::Opacity(value)) => Some(*value),
+        _ => None,
     }
 }
 
