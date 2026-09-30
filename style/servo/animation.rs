@@ -28,6 +28,7 @@ use crate::stylesheets::layer_rule::LayerOrder;
 use crate::values::animated::{Animate, Procedure};
 use crate::values::computed::TimingFunction;
 use crate::values::generics::easing::BeforeFlag;
+use crate::values::generics::easing::TimingKeyword;
 use crate::values::specified::TransitionBehavior;
 use crate::Atom;
 use debug_unreachable::debug_unreachable;
@@ -518,6 +519,76 @@ impl ComputedKeyframe {
         }));
 
         computed_steps.into_boxed_slice()
+    }
+}
+
+/// The opacity contribution of an already-selected keyframes rule at its final
+/// offset.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FinalKeyframeOpacity {
+    /// The animation does not animate opacity.
+    NoEffect,
+    /// The final keyframe omits opacity, so the effect stack supplies the
+    /// underlying value.
+    Underlying,
+    /// The final keyframe explicitly replaces opacity with this computed value.
+    Replace(f32),
+    /// The final contribution could not be resolved.
+    Unknown,
+}
+
+/// Resolve the final opacity contribution of an already-selected keyframes rule.
+///
+/// This uses the same keyframe grouping, variable substitution, underlying
+/// value synthesis, and computed-value conversion as running animations. It
+/// preserves whether the final value was explicit or supplied by the
+/// underlying effect stack.
+pub fn final_keyframe_opacity<E>(
+    element: E,
+    animation: &KeyframesAnimation,
+    context: &SharedStyleContext,
+    base_style: &Arc<ComputedValues>,
+    resolver: &mut StyleResolverForElement<E>,
+) -> FinalKeyframeOpacity
+where
+    E: TElement,
+{
+    let opacity = PropertyDeclarationId::Longhand(LonghandId::Opacity);
+    if !animation.properties_changed.contains(opacity) {
+        return FinalKeyframeOpacity::NoEffect;
+    }
+    let final_step_declares_opacity = animation.steps.iter().rev().any(|step| {
+        if step.start_offset.percentage.0 != 1.0 {
+            return false;
+        }
+        let KeyframesStepValue::Declarations { ref block } = step.value else {
+            return false;
+        };
+        block
+            .read_with(&context.guards.author)
+            .normal_declaration_iter()
+            .any(|declaration| declaration.id() == opacity)
+    });
+    if !final_step_declares_opacity {
+        return FinalKeyframeOpacity::Underlying;
+    }
+    let mut properties = PropertyDeclarationIdSet::default();
+    properties.insert(opacity);
+    let steps = ComputedKeyframe::generate_for_keyframes(
+        element,
+        animation,
+        context,
+        base_style,
+        TimingFunction::Keyword(TimingKeyword::Ease),
+        resolver,
+        properties,
+        1,
+    );
+    match steps.last().and_then(|step| step.values.first()) {
+        Some(AnimationValueOrReference::AnimationValue(AnimationValue::Opacity(value))) => {
+            FinalKeyframeOpacity::Replace(*value)
+        },
+        _ => FinalKeyframeOpacity::Unknown,
     }
 }
 

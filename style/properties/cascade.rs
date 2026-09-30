@@ -1146,6 +1146,11 @@ impl<'a> Cascade<'a> {
         };
 
         self.seen.longhands.insert(longhand_id);
+        if longhand_id == LonghandId::Visibility && !can_skip_apply {
+            context
+                .builder
+                .add_flags(ComputedValueFlags::HAS_OWN_VISIBILITY);
+        }
         if origin.is_author_origin() {
             self.author_specified.insert(longhand_id);
         }
