@@ -162,6 +162,10 @@ bitflags! {
         const HEADING_LEVEL_BITS = 0b1111u64 << HEADING_LEVEL_OFFSET;
         /// https://w3c.github.io/picture-in-picture/#css-pseudo-class
         const PICTURE_IN_PICTURE = 1u64 << 61;
+        /// A declarative WebMCP form is executing a tool.
+        const TOOL_FORM_ACTIVE = 1u64 << 62;
+        /// The submit control selected by an executing WebMCP form.
+        const TOOL_SUBMIT_ACTIVE = 1u64 << 63;
 
         /// Some convenience unions.
         const DIR_STATES = Self::LTR.bits() | Self::RTL.bits();
