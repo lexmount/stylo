@@ -227,6 +227,18 @@ impl CssEnvironment {
             return None;
         }
 
+        #[cfg(feature = "servo")]
+        if *name == Atom::from("preferred-text-scale") {
+            return Some(VariableValue::from_token(
+                Token::Number {
+                    has_sign: false,
+                    value: device.preferred_text_scale(),
+                    int_value: None,
+                },
+                url_data,
+            ));
+        }
+
         if let Some(var) = ENVIRONMENT_VARIABLES.iter().find(|var| var.name == *name) {
             return Some((var.evaluator)(device, url_data));
         }
