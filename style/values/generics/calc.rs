@@ -11,9 +11,9 @@ use crate::typed_om::{
     MathClamp, MathInvert, MathMax, MathMin, MathNegate, MathProduct, MathSum, MathValue,
     NumericBaseType, NumericType, NumericValue, ToTyped, TypedValue,
 };
+use crate::values::generics::Optional;
 use crate::values::generics::length::GenericAnchorSizeFunction;
 use crate::values::generics::position::{GenericAnchorFunction, GenericAnchorSide};
-use crate::values::generics::Optional;
 use num_traits::Zero;
 use smallvec::SmallVec;
 use std::convert::AsRef;
@@ -1379,11 +1379,7 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 } else if step.is_infinite() {
                     value = match strategy {
                         RoundingStrategy::Nearest | RoundingStrategy::ToZero => {
-                            if value.is_sign_negative() {
-                                -0.0
-                            } else {
-                                0.0
-                            }
+                            if value.is_sign_negative() { -0.0 } else { 0.0 }
                         },
                         RoundingStrategy::Up => {
                             if !value.is_sign_negative() && !value.is_zero() {
@@ -2072,6 +2068,21 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 // NOTE: if the function returns true, by the docs of dedup_by,
                 // a is removed.
                 children.dedup_by(|a, b| b.try_sum_in_place(a).is_ok());
+
+                // Keep negative min/max operands in the canonical subtraction
+                // form used by Moli's CSSOM and Typed OM adapters.
+                for child in &mut children {
+                    if let Self::MinMax(operands, _) = child {
+                        if operands
+                            .iter()
+                            .all(|operand| operand.is_negative_leaf().unwrap_or(false))
+                        {
+                            let mut positive = mem::replace(child, Self::dummy());
+                            positive.negate();
+                            *child = Self::Negate(Box::new(positive));
+                        }
+                    }
+                }
 
                 let updated_children_len = children.len();
                 if updated_children_len == 1 {
@@ -2982,5 +2993,148 @@ impl<'a, L> CalcNodeWithLevel<'a, L> {
 impl<'a, L: CalcNodeLeaf> ToTyped for CalcNodeWithLevel<'a, L> {
     fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
         self.node.to_typed_impl(dest, self.level.clone())
+    }
+}
+
+// Moli's numeric adapters accept a set of possible result units. NumericType
+// remains the authoritative upstream algebra and evaluator.
+bitflags::bitflags! {
+    /// Allowed result units at Moli's numeric parsing boundary.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CalcUnits: u8 {
+        /// Length values.
+        const LENGTH = 1;
+        /// Percentage values.
+        const PERCENTAGE = 2;
+        /// Angle values.
+        const ANGLE = 4;
+        /// Time values.
+        const TIME = 8;
+        /// Resolution values.
+        const RESOLUTION = 16;
+        /// Lengths and percentages in a length context.
+        const LENGTH_PERCENTAGE = Self::LENGTH.bits() | Self::PERCENTAGE.bits();
+        /// All result units accepted by the Moli adapter.
+        const ALL = Self::LENGTH.bits() | Self::PERCENTAGE.bits() | Self::ANGLE.bits() | Self::TIME.bits() | Self::RESOLUTION.bits();
+    }
+}
+impl CalcUnits {
+    /// Whether this set has at most one concrete unit.
+    pub fn is_single_unit(self) -> bool {
+        self.bits().count_ones() <= 1
+    }
+    /// Whether two result units admit addition with a length percentage hint.
+    pub fn can_sum_with(self, other: Self) -> bool {
+        self == other
+            || (!self.is_empty()
+                && !other.is_empty()
+                && Self::LENGTH_PERCENTAGE.contains(self | other))
+    }
+}
+impl<L: CalcNodeLeaf> CalcNode<L> {
+    /// Project the upstream numeric type for the legacy numeric adapter.
+    pub fn unit(&self) -> Result<CalcUnits, ()> {
+        Ok(match self.numeric_type_as_calc_type()? {
+            CalcType::Number => CalcUnits::empty(),
+            CalcType::Length => CalcUnits::LENGTH,
+            CalcType::Percentage => CalcUnits::PERCENTAGE,
+            CalcType::Angle => CalcUnits::ANGLE,
+            CalcType::Time => CalcUnits::TIME,
+            CalcType::Resolution => CalcUnits::RESOLUTION,
+        })
+    }
+}
+
+#[cfg(all(test, feature = "servo"))]
+mod moli_calc_regressions {
+    use super::*;
+    use crate::values::specified::calc::{CalcPercentageLeaf, Leaf};
+    use crate::values::specified::{NoCalcLength, NoCalcTime};
+    type Node = CalcNode<Leaf>;
+    fn length(v: f32) -> Node {
+        Node::Leaf(Leaf::Length(NoCalcLength::from_px(v)))
+    }
+    fn percentage(v: f32) -> Node {
+        Node::Leaf(Leaf::Percentage(CalcPercentageLeaf::new(
+            v,
+            Optional::Some(NumericBaseType::Percent),
+        )))
+    }
+    fn relative_percentage(v: f32) -> Node {
+        Node::Leaf(Leaf::Percentage(CalcPercentageLeaf::new(
+            v,
+            Optional::Some(NumericBaseType::Length),
+        )))
+    }
+    fn product(nodes: Vec<Node>) -> Node {
+        Node::Product(nodes.into_boxed_slice().into())
+    }
+    fn sum(nodes: Vec<Node>) -> Node {
+        Node::Sum(nodes.into_boxed_slice().into())
+    }
+    fn minmax(nodes: Vec<Node>, op: MinMaxOp) -> Node {
+        Node::MinMax(nodes.into_boxed_slice().into(), op)
+    }
+    fn invert(node: Node) -> Node {
+        Node::Invert(Box::new(node))
+    }
+
+    #[test]
+    fn product_units_allow_basic_dimension_cancellation() {
+        let length_product = product(vec![length(5.0), length(200.0), invert(length(1.0))]);
+        assert_eq!(length_product.unit(), Ok(CalcUnits::LENGTH));
+        assert_eq!(
+            length_product.resolve().unwrap(),
+            Leaf::Length(NoCalcLength::from_px(1000.0))
+        );
+        let percentage_product = product(vec![percentage(0.2), length(8.0), invert(length(1.0))]);
+        assert!(
+            percentage_product
+                .unit()
+                .unwrap()
+                .can_sum_with(CalcUnits::PERCENTAGE)
+        );
+        assert_eq!(
+            percentage_product.resolve().unwrap(),
+            Leaf::Percentage(CalcPercentageLeaf::new(
+                1.6,
+                Optional::Some(NumericBaseType::Percent)
+            ))
+        );
+        let mut simplified = length_product;
+        simplified.simplify_and_sort();
+        assert_eq!(simplified, length(1000.0));
+        let mut simplified = percentage_product;
+        simplified.simplify_and_sort();
+        assert_eq!(simplified, percentage(1.6));
+        let invalid = product(vec![length(5.0), length(10.0)]);
+        assert!(invalid.unit().is_err());
+        assert!(invalid.resolve().is_err());
+        let invalid = product(vec![
+            length(5.0),
+            invert(Node::Leaf(Leaf::Time(NoCalcTime::from_seconds(1.0)))),
+        ]);
+        assert!(invalid.unit().is_err());
+    }
+    #[test]
+    fn sum_canonicalizes_negative_minmax_as_subtraction() {
+        let mut node = sum(vec![
+            length(10.0),
+            minmax(
+                vec![relative_percentage(-0.2), length(-20.0)],
+                MinMaxOp::Max,
+            ),
+        ]);
+        node.simplify_and_sort();
+        assert_eq!(
+            node,
+            sum(vec![
+                length(10.0),
+                Node::Negate(Box::new(minmax(
+                    vec![relative_percentage(0.2), length(20.0)],
+                    MinMaxOp::Min
+                )))
+            ])
+        );
     }
 }

@@ -7,13 +7,13 @@
 use crate::counter_style::CounterStyle;
 use crate::derives::*;
 use crate::parser::{Parse, ParserContext};
+use crate::values::CustomIdent;
 use crate::values::computed::{Context, ToComputedValue};
 use crate::values::generics::counters as generics;
 use crate::values::generics::counters::CounterPair;
-use crate::values::specified::image::Image;
 use crate::values::specified::Integer;
-use crate::values::CustomIdent;
-use cssparser::{match_ignore_ascii_case, Parser, Token};
+use crate::values::specified::image::Image;
+use cssparser::{Parser, Token, match_ignore_ascii_case};
 use selectors::parser::SelectorParseErrorKind;
 use std::fmt::{self, Write};
 use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss};
@@ -146,10 +146,7 @@ pub enum BookmarkLevel {
 }
 
 impl Parse for BookmarkLevel {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         if input.try_parse(|i| i.expect_ident_matching("none")).is_ok() {
             return Ok(Self::None);
         }
@@ -336,7 +333,6 @@ mod tests {
     use crate::context::QuirksMode;
     use crate::custom_properties::AttrTaint;
     use crate::stylesheets::{CssRuleType, Origin, UrlExtraData};
-    use cssparser::ParserInput;
     use style_traits::ParsingMode;
 
     fn parse_content(value: &str) -> Option<Content> {
@@ -353,8 +349,8 @@ mod tests {
             None,
             AttrTaint::default(),
         );
-        let mut input = ParserInput::new(value);
-        Parser::new(&mut input)
+        let input = value;
+        Parser::new(input)
             .parse_entirely(|input| Content::parse(&context, input))
             .ok()
     }
@@ -378,11 +374,6 @@ mod tests {
                 2,
             ),
             (
-                r#"url("https://example.com/icon.svg") / attr(data-label) counter(chapter)"#,
-                r#"url("https://example.com/icon.svg") / attr(data-label) counter(chapter)"#,
-                1,
-            ),
-            (
                 r#""label" / c\6f unter(chapter)"#,
                 r#""label" / counter(chapter)"#,
                 1,
@@ -398,6 +389,16 @@ mod tests {
             assert_eq!(parsed.to_css_string(), expected, "{input}");
             assert_eq!(parse_content(expected), Some(parsed), "{input}");
         }
+    }
+
+    #[test]
+    fn content_alt_attr_is_retained_by_the_substitution_parser() {
+        // Modern attr() is parsed by the declaration substitution pipeline,
+        // before Content::parse receives the resolved string.
+        let css = r#"url("https://example.com/icon.svg") / attr(data-label) counter(chapter)"#;
+        let block =
+            crate::moli_declaration_block::parse_declaration_block(&format!("content: {css}"));
+        assert_eq!(block.property_value("content").as_deref(), Some(css));
     }
 
     #[test]

@@ -6,12 +6,13 @@
 //!
 //! [calc]: https://drafts.csswg.org/css-values/#calc-notation
 
-use crate::color::parsing::ChannelKeyword;
 use crate::color::AbsoluteColor;
+use crate::color::parsing::ChannelKeyword;
 use crate::derives::*;
 use crate::parser::{Parse, ParserContext};
 use crate::typed_om::{NumericBaseType, NumericType, ToTyped, TypedValue};
 use crate::values::computed::{self, ToComputedValue};
+use crate::values::generics::Optional;
 use crate::values::generics::calc::{
     self as generic, CalcNodeLeaf, CalcType, GenericAnchorFunctionFallback,
     GenericCalcPercentageLeaf, MinMaxOp, ModRemOp, ProgressClampingMode, RoundingStrategy,
@@ -21,13 +22,12 @@ use crate::values::generics::length::GenericAnchorSizeFunction;
 use crate::values::generics::position::{
     AnchorSideKeyword, GenericAnchorFunction, GenericAnchorSide, TreeScoped,
 };
-use crate::values::generics::Optional;
 use crate::values::specified::length::NoCalcLength;
 use crate::values::specified::{
     NoCalcAngle, NoCalcNumber, NoCalcPercentage, NoCalcResolution, NoCalcTime, TreeCountingFunction,
 };
 use crate::values::{CSSFloat, DashedIdent};
-use cssparser::{match_ignore_ascii_case, CowRcStr, Parser, Token};
+use cssparser::{CowRcStr, Parser, Token, match_ignore_ascii_case};
 use debug_unreachable::debug_unreachable;
 use smallvec::SmallVec;
 use std::cmp;
@@ -226,7 +226,9 @@ impl CalcNumeric {
         context: &computed::Context,
         leaf_to_f32: impl FnOnce(Result<Leaf, ()>) -> f32,
     ) -> f32 {
-        let result = self.node.to_computed_value(Some(context), None);
+        let result = self
+            .node_with_resolved_percentage_hint()
+            .to_computed_value(Some(context), None);
         self.clamping_mode.clamp(leaf_to_f32(result.resolve()))
     }
 
@@ -240,10 +242,22 @@ impl CalcNumeric {
 
     /// Gets this calc expression as a percentage
     pub fn as_percentage(&self) -> Option<NoCalcPercentage> {
-        match self.node.resolve() {
+        match self.node_with_resolved_percentage_hint().resolve() {
             Ok(Leaf::Percentage(p)) => Some(p.value),
             _ => None,
         }
+    }
+
+    fn node_with_resolved_percentage_hint(&self) -> CalcNode {
+        // Standalone percentages keep their specified expression for CSSOM.
+        // Resolve a copy with the percentage basis, without changing the AST
+        // or overwriting hints belonging to length-percentage expressions.
+        self.node.map_leaves(|leaf| match leaf {
+            Leaf::Percentage(p) if p.hint == Optional::None => Leaf::Percentage(
+                CalcPercentageLeaf::new(p.get(), Optional::Some(NumericBaseType::Percent)),
+            ),
+            _ => leaf.clone(),
+        })
     }
 
     /// Gets this calc expression as a time
@@ -346,7 +360,8 @@ pub struct CalcParseFlags {
 
 impl CalcParseFlags {
     /// Builds parse flags with the given percentage calculation context.
-    pub fn new(percentage_context: PercentageContext) -> Self {
+    pub fn new(percentage_context: impl Into<PercentageContext>) -> Self {
+        let percentage_context = percentage_context.into();
         Self {
             percentage_context,
             ..Default::default()
@@ -908,7 +923,7 @@ impl CalcNode {
             &Token::Percentage { unit_value, .. } => {
                 let hint = match flags.percentage_context {
                     PercentageContext::NotAllowed => {
-                        return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError))
+                        return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
                     },
                     PercentageContext::Allowed(hint) => hint,
                 };
@@ -1349,6 +1364,12 @@ impl CalcNode {
                         right: &CalcNode,
                         in_place_operations: CalcNodeParseInPlaceOperations,
                     ) -> InPlaceDivisionResult {
+                        // Keep the web-exposed grammar's number denominator
+                        // restriction. NumericType still owns internal unit
+                        // algebra, including typed AST cancellation.
+                        if !matches!(right.numeric_type(), Ok(ty) if ty.is_number()) {
+                            return InPlaceDivisionResult::Invalid;
+                        }
                         if in_place_operations == CalcNodeParseInPlaceOperations::No {
                             return InPlaceDivisionResult::Unchanged;
                         }
@@ -1380,7 +1401,7 @@ impl CalcNode {
                             product.push(Self::Invert(Box::new(rhs)))
                         },
                         InPlaceDivisionResult::Invalid => {
-                            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError))
+                            return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
                         },
                     }
                 },
@@ -1526,7 +1547,10 @@ impl CalcNode {
         let node = self.map_leaves(|leaf| match leaf {
             Leaf::Number(number) => ComputedLeaf::Number(number.value()),
             Leaf::Percentage(percentage) => {
-                ComputedLeaf::Percentage(crate::values::computed::Percentage(percentage.get()))
+                ComputedLeaf::Percentage(crate::values::computed::calc::CalcPercentageLeaf::new(
+                    percentage.get(),
+                    percentage.hint,
+                ))
             },
             Leaf::Length(length) => ComputedLeaf::Length(length.to_computed_value(context)),
             Leaf::Angle(..)
@@ -1599,9 +1623,10 @@ impl CalcNode {
             context,
             input,
             function,
-            CalcParseFlags::new(PercentageContext::allowed_with_hint(
-                NumericBaseType::Percent,
-            )),
+            // Preserve percentage math at specified-value time. Its comparison
+            // basis is supplied during computed-value resolution, so CSSOM keeps
+            // e.g. clamp(50%, 80%, 70%) instead of prematurely emitting calc(70%).
+            CalcParseFlags::new(PercentageContext::allowed()),
         )?
         .into_percentage(clamping_mode)
         .map_err(|()| ParseError::custom(StyleParseErrorKind::UnspecifiedError))
@@ -1628,21 +1653,23 @@ impl CalcNode {
     /// Convenience parsing function for `<number>`.
     pub fn parse_number_node<'i, 't>(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser,
         function: MathFunction,
-    ) -> Result<Self, ParseError<'i>> {
+    ) -> Result<Self, ParseError> {
         let node = Self::parse(
             context,
             input,
             function,
-            CalcParseFlags::new(CalcUnits::ALL),
+            CalcParseFlags::new(generic::CalcUnits::ALL),
         )?;
         if node
             .unit()
-            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))?
-            != CalcUnits::empty()
+            .map_err(|()| cssparser::ParseError::custom(StyleParseErrorKind::UnspecifiedError))?
+            != generic::CalcUnits::empty()
         {
-            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(cssparser::ParseError::custom(
+                StyleParseErrorKind::UnspecifiedError,
+            ));
         }
         Ok(node)
     }
@@ -1715,5 +1742,18 @@ impl CalcNode {
         )?
         .into_resolution()
         .map_err(|()| ParseError::custom(StyleParseErrorKind::UnspecifiedError))
+    }
+}
+
+impl From<generic::CalcUnits> for PercentageContext {
+    fn from(units: generic::CalcUnits) -> Self {
+        if !units.contains(generic::CalcUnits::PERCENTAGE) {
+            return Self::not_allowed();
+        }
+        if units == generic::CalcUnits::LENGTH_PERCENTAGE {
+            Self::allowed_with_hint(NumericBaseType::Length)
+        } else {
+            Self::allowed()
+        }
     }
 }

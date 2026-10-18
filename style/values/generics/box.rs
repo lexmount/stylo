@@ -4,10 +4,10 @@
 
 //! Generic types for box properties.
 
+use crate::Zero;
 use crate::derives::*;
 use crate::values::animated::ToAnimatedZero;
 use crate::values::generics::Optional;
-use crate::Zero;
 use std::fmt::{self, Write};
 use style_traits::values::SequenceWriter;
 use style_traits::{CssWriter, ToCss};
@@ -342,7 +342,11 @@ impl<I: ToCss> ToCss for LineClamp<I> {
         if !self.block_ellipsis.is_ellipsis() {
             writer.item(&self.block_ellipsis)?;
         }
-        if self.webkit_legacy && crate::pref!("layout.css.line-clamp.enabled") {
+        // Servo exposes the longhand without Gecko's feature pref, so its
+        // serialized value must retain the legacy bit when parsed again.
+        if self.webkit_legacy
+            && (cfg!(feature = "servo") || crate::pref!("layout.css.line-clamp.enabled"))
+        {
             writer.raw_item("-webkit-legacy")?;
         }
         Ok(())

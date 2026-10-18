@@ -4,6 +4,7 @@
 
 //! Code for invalidations due to state or attribute changes.
 
+use crate::AllocErr;
 use crate::context::QuirksMode;
 use crate::derives::*;
 use crate::selector_map::{
@@ -11,7 +12,6 @@ use crate::selector_map::{
 };
 use crate::selector_parser::{NonTSPseudoClass, SelectorImpl};
 use crate::values::AtomIdent;
-use crate::AllocErr;
 use crate::{Atom, LocalName, Namespace, ShrinkIfNeeded};
 use dom::{DocumentState, ElementState};
 use selectors::attr::NamespaceConstraint;
@@ -1133,7 +1133,7 @@ impl<'a, 'b, 'c> SelectorDependencyCollector<'a, 'b, 'c> {
     fn note_type_sibling_dependency_if_possible(&mut self, dependency: Dependency) -> bool {
         let mut local_names = SmallVec::<[LocalName; 2]>::new();
         for ss in self.selector.iter_from(self.compound_state.offset) {
-            if let Component::LocalName(ref name) = ss {
+            if let Component::LocalName(name) = ss {
                 local_names.push(name.name.clone());
                 if name.name != name.lower_name {
                     local_names.push(name.lower_name.clone());

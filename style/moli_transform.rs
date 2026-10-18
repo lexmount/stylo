@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use cssparser::{BasicParseErrorKind, Parser, ParserInput, SourcePosition, Token};
+use cssparser::{BasicParseErrorKind, Parser, SourcePosition, Token};
 use style_traits::ParsingMode;
 
 use crate::{
@@ -30,8 +30,8 @@ pub fn parse_transform_function_list(raw: &str) -> Option<Vec<CssTransformFuncti
 
 fn parse_stylo_transform(raw: &str) -> Option<Vec<CssTransformFunction>> {
     with_stylo_transform_context(|context| {
-        let mut input = ParserInput::new(raw.trim());
-        let mut parser = Parser::new(&mut input);
+        let input = raw.trim();
+        let mut parser = Parser::new(input);
         let _ = Transform::parse(context, &mut parser).ok()?;
         parser.expect_exhausted().ok()?;
         parse_compat_transform_function_list(raw)
@@ -55,25 +55,27 @@ fn with_stylo_transform_context<R>(f: impl FnOnce(&ParserContext) -> R) -> Optio
 }
 
 fn parse_compat_transform_function_list(raw: &str) -> Option<Vec<CssTransformFunction>> {
-    let mut input = ParserInput::new(raw);
-    let mut parser = Parser::new(&mut input);
+    let input = raw;
+    let mut parser = Parser::new(input);
     parser
         .parse_entirely(|input| {
             let mut functions = Vec::new();
             while !input.is_exhausted() {
                 let token = input.next().map_err(cssparser::ParseError::from)?.clone();
                 let Token::Function(name) = token else {
-                    return Err(input.new_error(BasicParseErrorKind::UnexpectedToken(token)));
+                    return Err(cssparser::ParseError::from_basic_kind(
+                        BasicParseErrorKind::UnexpectedToken,
+                    ));
                 };
                 let name = name.to_ascii_lowercase();
                 if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric()) {
-                    return Err(input.new_custom_error(()));
+                    return Err(cssparser::ParseError::custom(()));
                 }
                 let arguments = input.parse_nested_block(parse_transform_arguments)?;
                 functions.push(CssTransformFunction { name, arguments });
             }
             if functions.is_empty() {
-                return Err(input.new_custom_error(()));
+                return Err(cssparser::ParseError::custom(()));
             }
             Ok(functions)
         })
@@ -81,8 +83,8 @@ fn parse_compat_transform_function_list(raw: &str) -> Option<Vec<CssTransformFun
 }
 
 fn parse_transform_arguments<'i>(
-    input: &mut Parser<'i, '_>,
-) -> Result<Vec<String>, cssparser::ParseError<'i, ()>> {
+    input: &mut Parser,
+) -> Result<Vec<String>, cssparser::ParseError<()>> {
     let mut arguments = Vec::new();
     let mut argument_start: Option<SourcePosition> = None;
     let mut argument_end: Option<SourcePosition> = None;
@@ -105,7 +107,7 @@ fn parse_transform_arguments<'i>(
             },
             Token::Comma => {
                 if saw_whitespace_separator {
-                    return Err(input.new_custom_error(()));
+                    return Err(cssparser::ParseError::custom(()));
                 }
                 push_argument(
                     input,
@@ -117,7 +119,9 @@ fn parse_transform_arguments<'i>(
                 pending_whitespace = false;
             },
             token if token.is_parse_error() => {
-                return Err(input.new_error(BasicParseErrorKind::UnexpectedToken(token)));
+                return Err(cssparser::ParseError::from_basic_kind(
+                    BasicParseErrorKind::UnexpectedToken,
+                ));
             },
             token => {
                 if pending_whitespace && !saw_comma {
@@ -144,26 +148,26 @@ fn parse_transform_arguments<'i>(
 }
 
 fn push_argument<'i>(
-    input: &Parser<'i, '_>,
+    input: &Parser,
     arguments: &mut Vec<String>,
     start: Option<SourcePosition>,
     end: Option<SourcePosition>,
-) -> Result<(), cssparser::ParseError<'i, ()>> {
+) -> Result<(), cssparser::ParseError<()>> {
     let (Some(start), Some(end)) = (start, end) else {
-        return Err(input.new_custom_error(()));
+        return Err(cssparser::ParseError::custom(()));
     };
     let argument = input.slice(start..end).trim();
     if argument.is_empty() {
-        return Err(input.new_custom_error(()));
+        return Err(cssparser::ParseError::custom(()));
     }
     arguments.push(argument.to_owned());
     Ok(())
 }
 
 fn consume_nested_component_value<'i>(
-    input: &mut Parser<'i, '_>,
+    input: &mut Parser,
     token: &Token<'i>,
-) -> Result<(), cssparser::ParseError<'i, ()>> {
+) -> Result<(), cssparser::ParseError<()>> {
     if matches!(
         token,
         Token::Function(_)
@@ -176,16 +180,16 @@ fn consume_nested_component_value<'i>(
     Ok(())
 }
 
-fn consume_component_values<'i>(
-    input: &mut Parser<'i, '_>,
-) -> Result<(), cssparser::ParseError<'i, ()>> {
+fn consume_component_values<'i>(input: &mut Parser) -> Result<(), cssparser::ParseError<()>> {
     while !input.is_exhausted() {
         let token = input
             .next_including_whitespace_and_comments()
             .map_err(cssparser::ParseError::from)?
             .clone();
         if token.is_parse_error() {
-            return Err(input.new_error(BasicParseErrorKind::UnexpectedToken(token)));
+            return Err(cssparser::ParseError::from_basic_kind(
+                BasicParseErrorKind::UnexpectedToken,
+            ));
         }
         consume_nested_component_value(input, &token)?;
     }

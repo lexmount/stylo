@@ -12,15 +12,15 @@ use crate::font_face::parse_font_face_block;
 use crate::media_queries::MediaList;
 use crate::parser::{NestingContext, Parse, ParserContext};
 use crate::properties::declaration_block::{
-    parse_property_declaration_list, DeclarationParserState, PropertyDeclarationBlock,
+    DeclarationParserState, PropertyDeclarationBlock, parse_property_declaration_list,
 };
-use crate::properties_and_values::rule::{parse_property_block, PropertyRuleName};
+use crate::properties_and_values::rule::{PropertyRuleName, parse_property_block};
 use crate::selector_parser::{SelectorImpl, SelectorParser};
 use crate::shared_lock::{Locked, SharedRwLock};
 use crate::stylesheets::container_rule::{ContainerCondition, ContainerConditions, ContainerRule};
 use crate::stylesheets::document_rule::DocumentCondition;
 use crate::stylesheets::font_feature_values_rule::{
-    parse_family_name_list, FontFeatureValuesBlockType,
+    FontFeatureValuesBlockType, parse_family_name_list,
 };
 use crate::stylesheets::import_rule::{ImportLayer, ImportRule, ImportSupportsCondition};
 use crate::stylesheets::keyframes_rule::parse_keyframe_list;
@@ -39,9 +39,9 @@ use crate::values::computed::font::FamilyName;
 use crate::values::{CssUrl, CustomIdent, DashedIdent, KeyframesName};
 use crate::{Atom, Namespace, Prefix};
 use cssparser::{
-    match_ignore_ascii_case, AtRuleParser, BasicParseError, BasicParseErrorKind, CowRcStr,
-    DeclarationParser, Parser, ParserInput, ParserState, QualifiedRuleParser, RuleBodyItemParser,
-    RuleBodyParser, SourcePosition,
+    AtRuleParser, BasicParseError, BasicParseErrorKind, CowRcStr, DeclarationParser, Parser,
+    ParserState, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, SourcePosition,
+    match_ignore_ascii_case,
 };
 use selectors::parser::{ParseRelative, SelectorList};
 use servo_arc::Arc;
@@ -264,8 +264,8 @@ pub(crate) fn parse_nested_rule_block(
     );
     context.nesting_context = NestingContext::new(containing_rule_types, parse_relative_rule_type);
 
-    let mut input = ParserInput::new(css);
-    let mut input = Parser::new(&mut input);
+    let input = css;
+    let mut input = Parser::new(input);
     let mut parser = TopLevelRuleParser {
         context,
         shared_lock,
@@ -326,15 +326,15 @@ impl AtRuleType {
             "font-face" => Self::FontFace,
             "font-feature-values" => Self::FontFeatureValues,
             "font-palette-values" if crate::pref!("layout.css.font-palette.enabled", gecko = true) => Self::FontPaletteValues,
-            "counter-style" if cfg!(feature = "gecko") => Self::CounterStyle,
+            "counter-style" => Self::CounterStyle,
             "media" => Self::Media,
             "custom-media" if crate::pref!("layout.css.custom-media.enabled") => Self::CustomMedia,
-            "container" if cfg!(feature = "gecko") => Self::Container,
+            "container" if static_prefs::pref!("layout.container-queries.enabled") => Self::Container,
             "supports" => Self::Supports,
             "keyframes" => Self::Keyframes(None),
             "-webkit-keyframes" => Self::Keyframes(Some(VendorPrefix::WebKit)),
             "-moz-keyframes" if cfg!(feature = "gecko") => Self::Keyframes(Some(VendorPrefix::Moz)),
-            "page" if cfg!(feature = "gecko") => Self::Page,
+            "page" => Self::Page,
             "property" if crate::pref!("layout.css.properties-and-values.enabled") => Self::Property,
             "-moz-document" if cfg!(feature = "gecko") => Self::Document,
             "import" => Self::Import,
@@ -347,7 +347,7 @@ impl AtRuleType {
             "view-transition" if crate::pref!("dom.viewTransitions.cross-document.enabled") => Self::ViewTransition,
             _ => {
                 // The margin at-rules supported within @page.
-                if cfg!(feature = "gecko") && crate::pref!("layout.css.margin-rules.enabled") {
+                if crate::pref!("layout.css.margin-rules.enabled") {
                     if let Some(rule_type) = MarginRuleType::from_name(name) {
                         return Some(Self::Margin(rule_type));
                     }
@@ -474,7 +474,8 @@ impl<'a, 'i> AtRuleParser<'i> for TopLevelRuleParser<'a, 'i> {
                 let url =
                     CssUrl::new_from_untainted_string(url_string, &self.context, CorsMode::None);
 
-                let (layer, supports) = ImportRule::parse_layer_and_supports(input, &mut self.context)?;
+                let (layer, supports) =
+                    ImportRule::parse_layer_and_supports(input, &mut self.context)?;
 
                 let media = MediaList::parse(&mut self.context, input);
                 let media = Arc::new(self.shared_lock.wrap(media));
@@ -499,7 +500,7 @@ impl<'a, 'i> AtRuleParser<'i> for TopLevelRuleParser<'a, 'i> {
                     }) => {
                         return Err(ParseError::custom(
                             StyleParseErrorKind::UnexpectedTokenWithinNamespace,
-                        ))
+                        ));
                     },
                     Err(e) => return Err(e.into()),
                 };
@@ -1062,7 +1063,7 @@ impl<'a, 'i> AtRuleParser<'i> for NestedRuleParser<'a, 'i> {
                     _ => {
                         return Err(ParseError::from_basic_kind(
                             BasicParseErrorKind::AtRuleBodyInvalid,
-                        ))
+                        ));
                     },
                 };
                 CssRule::LayerBlock(Arc::new(LayerBlockRule {

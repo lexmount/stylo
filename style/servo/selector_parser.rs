@@ -19,7 +19,7 @@ use crate::selector_parser::{Direction, PseudoElementCascadeType, SelectorParser
 use crate::values::{AtomIdent, AtomString, CSSInteger};
 use crate::{Atom, CaseSensitivityExt, LocalName, Namespace, Prefix};
 use cssparser::{
-    match_ignore_ascii_case, serialize_identifier, CowRcStr, Parser as CssParser, ToCss,
+    CowRcStr, Parser as CssParser, ToCss, match_ignore_ascii_case, serialize_identifier,
 };
 use dom::{DocumentState, ElementState, HEADING_LEVEL_OFFSET};
 use rustc_hash::FxHashMap;
@@ -89,7 +89,7 @@ pub enum PseudoElement {
 }
 
 /// The count of all pseudo-elements.
-pub const PSEUDO_COUNT: usize = 33;
+pub const PSEUDO_COUNT: usize = 34;
 
 impl ToCss for PseudoElement {
     fn to_css<W>(&self, dest: &mut W) -> fmt::Result
@@ -159,8 +159,6 @@ impl ToCss for PseudoElement {
 }
 
 impl ::selectors::parser::PseudoElement for PseudoElement {
-    type Impl = SelectorImpl;
-
     fn accepts_state_pseudo_classes(&self) -> bool {
         matches!(self, Self::DetailsContent | Self::Picker)
     }
@@ -230,6 +228,7 @@ impl PseudoElement {
             PseudoElement::ServoAnonymousTableRow => 30,
             PseudoElement::ServoTableGrid => 31,
             PseudoElement::ServoTableWrapper => 32,
+            PseudoElement::MozProgressBar => 33,
         }
     }
 
@@ -431,7 +430,14 @@ impl PseudoElement {
     /// Whether this pseudo-element takes an argument.
     #[inline]
     pub fn has_argument(&self) -> bool {
-        false
+        matches!(
+            self,
+            Self::Highlight(_)
+                | Self::ViewTransitionGroup(_)
+                | Self::ViewTransitionImagePair(_)
+                | Self::ViewTransitionOld(_)
+                | Self::ViewTransitionNew(_)
+        )
     }
 
     /// Whether this pseudo-element is the ::target-text pseudo.
@@ -763,11 +769,6 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
     type Error = StyleParseErrorKind;
 
     #[inline]
-    fn parse_nth_child_of(&self) -> bool {
-        crate::pref!("layout.css.nth-child-of.enabled")
-    }
-
-    #[inline]
     fn parse_is_and_where(&self) -> bool {
         true
     }
@@ -855,9 +856,9 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
     fn parse_non_ts_functional_pseudo_class(
         &self,
         name: CowRcStr<'i>,
-        parser: &mut CssParser<'i, 't>,
+        parser: &mut CssParser,
         _after_part: bool,
-    ) -> Result<NonTSPseudoClass, ParseError<'i>> {
+    ) -> Result<NonTSPseudoClass, ParseError> {
         let pseudo_class = match_ignore_ascii_case! { &name,
             "lang" => {
                 NonTSPseudoClass::Lang(parser.expect_ident_or_string()?.as_ref().into())
@@ -872,11 +873,11 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
             "heading" => {
                 let result = parser.parse_comma_separated(|input| Ok(input.expect_integer()?))?;
                 if result.is_empty() {
-                    return Err(parser.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+                    return Err(cssparser::ParseError::custom(StyleParseErrorKind::UnspecifiedError));
                 }
                 NonTSPseudoClass::Heading(HeadingSelectorData(result.into_boxed_slice()))
             },
-            _ => return Err(parser.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name.clone()))),
+            _ => return Err(cssparser::ParseError::custom(SelectorParseErrorKind::UnexpectedIdent)),
         };
 
         Ok(pseudo_class)
@@ -963,8 +964,8 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
     fn parse_functional_pseudo_element<'t>(
         &self,
         name: CowRcStr<'i>,
-        parser: &mut CssParser<'i, 't>,
-    ) -> Result<PseudoElement, ParseError<'i>> {
+        parser: &mut CssParser,
+    ) -> Result<PseudoElement, ParseError> {
         match_ignore_ascii_case! { &name,
             "highlight" => {
                 let name = AtomIdent::from(parser.expect_ident()?.as_ref());
@@ -1004,11 +1005,9 @@ impl<'a, 'i> ::selectors::Parser<'i> for SelectorParser<'a> {
             },
             _ => {},
         }
-        Err(
-            parser.new_custom_error(SelectorParseErrorKind::UnsupportedPseudoClassOrElement(
-                name,
-            )),
-        )
+        Err(cssparser::ParseError::custom(
+            SelectorParseErrorKind::UnsupportedPseudoClassOrElement,
+        ))
     }
 
     fn default_namespace(&self) -> Option<Namespace> {

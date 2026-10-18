@@ -3,15 +3,14 @@
 use std::borrow::Cow;
 
 use cssparser::{
-    AtRuleParser, CowRcStr, Parser, ParserInput, QualifiedRuleParser, SourceLocation,
-    StyleSheetParser,
+    AtRuleParser, CowRcStr, Parser, QualifiedRuleParser, SourceLocation, StyleSheetParser,
 };
 use style_traits::{CssWriter, ParsingMode, ToCss};
 
 use crate::{
     context::QuirksMode,
     custom_properties::AttrTaint,
-    font_face::{parse_font_face_block, SourceList},
+    font_face::{SourceList, parse_font_face_block},
     parser::{Parse, ParserContext},
     stylesheets::{CssRuleType, Namespaces, Origin, UrlExtraData},
 };
@@ -24,8 +23,8 @@ pub struct CssFontFace {
 
 pub fn parse_font_faces(css_text: &str) -> Vec<CssFontFace> {
     with_font_face_context(|context| {
-        let mut input = ParserInput::new(css_text);
-        let mut parser_input = Parser::new(&mut input);
+        let input = css_text;
+        let mut parser_input = Parser::new(input);
         let mut parser = FontFaceRuleParser { context };
         StyleSheetParser::new(&mut parser_input, &mut parser)
             .filter_map(Result::ok)
@@ -36,8 +35,8 @@ pub fn parse_font_faces(css_text: &str) -> Vec<CssFontFace> {
 
 pub fn normalize_font_face_src(value: &str) -> Option<String> {
     with_font_face_context(|context| {
-        let mut input = ParserInput::new(value);
-        let mut parser = Parser::new(&mut input);
+        let input = value;
+        let mut parser = Parser::new(input);
         let source_list = parser
             .parse_entirely(|input| SourceList::parse(context, input))
             .ok()?;
@@ -73,10 +72,10 @@ impl<'a, 'i> AtRuleParser<'i> for FontFaceRuleParser<'a> {
     fn parse_prelude<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::Prelude, cssparser::ParseError<'i, Self::Error>> {
+        input: &mut Parser,
+    ) -> Result<Self::Prelude, cssparser::ParseError<Self::Error>> {
         if !name.eq_ignore_ascii_case("font-face") {
-            return Err(input.new_custom_error(()));
+            return Err(cssparser::ParseError::custom(()));
         }
         let source_location = input.current_source_location();
         input.expect_exhausted()?;
@@ -87,19 +86,19 @@ impl<'a, 'i> AtRuleParser<'i> for FontFaceRuleParser<'a> {
         &mut self,
         source_location: Self::Prelude,
         _start: &cssparser::ParserState,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::AtRule, cssparser::ParseError<'i, Self::Error>> {
+        input: &mut Parser,
+    ) -> Result<Self::AtRule, cssparser::ParseError<Self::Error>> {
         let rule = parse_font_face_block(self.context, input, source_location);
         let family = rule
             .descriptors
             .font_family
-            .ok_or_else(|| input.new_custom_error(()))?;
+            .ok_or_else(|| cssparser::ParseError::custom(()))?;
         let source = rule
             .descriptors
             .src
             .as_ref()
             .and_then(to_css_string)
-            .ok_or_else(|| input.new_custom_error(()))?;
+            .ok_or_else(|| cssparser::ParseError::custom(()))?;
         Ok(CssFontFace {
             family: family.name.to_string(),
             source,

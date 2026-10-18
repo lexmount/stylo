@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use cssparser::{Parser, ParserInput};
+use cssparser::Parser;
 use style_traits::{CssString, ParsingMode};
 
 use crate::{
@@ -10,9 +10,9 @@ use crate::{
     custom_properties::AttrTaint,
     parser::ParserContext,
     properties::{
-        parse_one_declaration_into, parse_property_declaration_list, AllShorthand, Importance,
-        PropertyDeclaration, PropertyDeclarationBlock, PropertyDeclarationId, PropertyId,
-        SourcePropertyDeclaration,
+        AllShorthand, Importance, PropertyDeclaration, PropertyDeclarationBlock,
+        PropertyDeclarationId, PropertyId, SourcePropertyDeclaration, parse_one_declaration_into,
+        parse_property_declaration_list,
     },
     stylesheets::{CssRuleType, Namespaces, Origin, UrlExtraData},
 };
@@ -264,11 +264,11 @@ fn affected_names_for_property_id(property: &PropertyId) -> Vec<String> {
             names.extend(
                 shorthand
                     .longhands()
-                    .map(|longhand| longhand.name().to_owned()),
+                    .map(|longhand| moli_property_name(longhand.name()).to_owned()),
             );
             names
         },
-        Err(id) => vec![id.name().into_owned()],
+        Err(id) => vec![moli_property_name(&id.name()).to_owned()],
     };
     append_moli_cssom_affected_names(&name, &mut names);
     names
@@ -299,12 +299,19 @@ fn parse_style_context_property_id(name: &str) -> Option<PropertyId> {
 fn property_name(property: &PropertyId) -> String {
     match property.as_shorthand() {
         Ok(shorthand) => shorthand.name().to_owned(),
-        Err(id) => id.name().into_owned(),
+        Err(id) => moli_property_name(&id.name()).to_owned(),
     }
 }
 
 fn property_declaration_name(property: PropertyDeclarationId<'_>) -> String {
-    property.name().into_owned()
+    moli_property_name(&property.name()).to_owned()
+}
+
+fn moli_property_name(name: &str) -> &str {
+    match name {
+        "font-width" => "font-stretch",
+        _ => name,
+    }
 }
 
 fn source_declaration_has_unresolved_value(declarations: &SourcePropertyDeclaration) -> bool {
@@ -362,8 +369,8 @@ fn source_declaration_entries(
 
 pub fn parse_declaration_block(css_text: &str) -> CssDeclarationBlock {
     with_declaration_context(|context| {
-        let mut input = ParserInput::new(css_text);
-        let mut parser = Parser::new(&mut input);
+        let input = css_text;
+        let mut parser = Parser::new(input);
         CssDeclarationBlock::new(parse_property_declaration_list(context, &mut parser, &[]))
     })
     .unwrap_or_default()
@@ -387,7 +394,7 @@ fn with_declaration_context<R>(f: impl FnOnce(&ParserContext) -> R) -> Option<R>
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_declaration_block, CssDeclarationBlock, CssDeclarationEntry, CssSetResult};
+    use super::{CssDeclarationBlock, CssDeclarationEntry, CssSetResult, parse_declaration_block};
 
     fn set_projection_entries(
         block: &mut CssDeclarationBlock,

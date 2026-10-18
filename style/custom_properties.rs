@@ -216,7 +216,12 @@ impl CssEnvironment {
                 .0
                 .iter()
                 .find(|p| p.name.0 == *name)?;
-            let mut parser = cssparser::Parser::new(param.value.0.as_ref());
+            let crate::values::specified::param::LinkParamValueOrNone::Specified(value) =
+                &param.value
+            else {
+                return None;
+            };
+            let mut parser = cssparser::Parser::new(value.as_ref());
             // need to carry around full variable value https://bugzilla.mozilla.org/show_bug.cgi?id=2028998
             return VariableValue::parse(&mut parser, None, url_data).ok();
         }
@@ -285,14 +290,13 @@ pub(crate) enum SubstitutionFunctionName {
 }
 
 impl SubstitutionFunctionName {
-    fn parse_var<'i, 't>(
-        input: &mut Parser<'i, 't>,
-        context: &ParserContext,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse_var<'i, 't>(input: &mut Parser, context: &ParserContext) -> Result<Self, ParseError> {
         if let Ok(name) = input.try_parse(|input| input.expect_ident_cloned()) {
             return match custom_property_name_from_ident(&name) {
                 Some(name) => Ok(Self::Static(name)),
-                None => Err(input.new_custom_error(SelectorParseErrorKind::UnexpectedIdent(name))),
+                None => Err(cssparser::ParseError::custom(
+                    SelectorParseErrorKind::UnexpectedIdent,
+                )),
             };
         }
 
@@ -336,9 +340,9 @@ impl SubstitutionFunctionName {
 }
 
 fn parse_var_reference_name<'i, 't>(
-    input: &mut Parser<'i, 't>,
+    input: &mut Parser,
     context: &ParserContext,
-) -> Result<SubstitutionFunctionName, ParseError<'i>> {
+) -> Result<SubstitutionFunctionName, ParseError> {
     SubstitutionFunctionName::parse_var(input, context)
 }
 
@@ -1158,9 +1162,12 @@ impl VariableValue {
                 // matching against is an HTML element in an HTML document.
                 // So to simplify invalidation we collect both potential
                 // references here.
-                references.insert(r.name.clone().into());
-                let lowercase = r.name.to_ascii_lowercase();
-                if r.name != lowercase {
+                let Some(name) = r.name.as_static_name() else {
+                    return;
+                };
+                references.insert(name.clone().into());
+                let lowercase = name.to_ascii_lowercase();
+                if *name != lowercase {
                     references.insert(lowercase.into());
                 }
             }
@@ -1970,14 +1977,14 @@ fn substitute_one_reference<'a>(
             #[cfg(feature = "gecko")]
             let local_name = LocalName::cast(name);
             #[cfg(feature = "servo")]
-            let local_name = LocalName::from(name.as_ref());
+            let _local_name = LocalName::from(name.as_ref());
             let namespace = match reference.attribute_data.namespace {
                 ParsedNamespace::Known(ref ns) => Some(ns),
                 ParsedNamespace::Unknown => None,
             };
             namespace
                 .and_then(|namespace| {
-                    LocalName::with_name(&reference.name, |local_name| {
+                    LocalName::with_name(name, |local_name| {
                         attribute_tracker.query(local_name, namespace)
                     })
                 })
@@ -2091,7 +2098,7 @@ fn substitute_internal<'a>(
     computed_context: &computed::Context,
     attribute_tracker: &mut AttributeTracker,
     seen: &mut SmallVec<[Name; 8]>,
-    mut attr_taint: Option<&mut AttrTaint>,
+    attr_taint: Option<&mut AttrTaint>,
 ) -> Result<Substitution<'a>, ()> {
     do_substitute_chunk(
         &variable_value.css,
@@ -2141,8 +2148,8 @@ mod tests {
 
     fn parse_variable_value(css: &str) -> VariableValue {
         let url_data = UrlExtraData::from(url::Url::parse("https://example.test/").unwrap());
-        let mut input = ParserInput::new(css);
-        let mut parser = Parser::new(&mut input);
+        let input = css;
+        let mut parser = Parser::new(input);
         VariableValue::parse(&mut parser, None, &url_data).unwrap()
     }
 
@@ -2154,10 +2161,12 @@ mod tests {
             value.references.refs[0].name,
             SubstitutionFunctionName::DynamicIdent(_)
         ));
-        assert!(value
-            .references
-            .non_custom_references(false)
-            .intersects(ReferenceFlags::FONT_UNITS));
+        assert!(
+            value
+                .references
+                .non_custom_references(false)
+                .intersects(ReferenceFlags::FONT_UNITS)
+        );
     }
 
     #[test]

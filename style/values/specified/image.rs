@@ -7,18 +7,19 @@
 //!
 //! [image]: https://drafts.csswg.org/css-images/#image-values
 
+use crate::Atom;
 use crate::color::mix::ColorInterpolationMethod;
 use crate::derives::*;
 use crate::parser::{Parse, ParserContext};
 use crate::stylesheets::CorsMode;
 use crate::typed_om::{ImageValue, KeywordValue, ToTyped, TypedValue};
+use crate::values::generics::NonNegative;
 use crate::values::generics::color::{ColorMixFlags, GenericLightDark};
 use crate::values::generics::image::{
     self as generic, Circle, Ellipse, GradientCompatMode, ShapeExtent,
 };
 use crate::values::generics::image::{GradientFlags, PaintWorklet};
 use crate::values::generics::position::Position as GenericPosition;
-use crate::values::generics::NonNegative;
 use crate::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
 use crate::values::specified::position::{Position, PositionComponent, Side};
 use crate::values::specified::url::SpecifiedUrl;
@@ -27,8 +28,7 @@ use crate::values::specified::{
     NonNegativeLengthPercentage, Resolution,
 };
 use crate::values::specified::{Number, NumberOrPercentage, Percentage};
-use crate::Atom;
-use cssparser::{match_ignore_ascii_case, Delimiter, Parser, Token};
+use cssparser::{Delimiter, Parser, Token, match_ignore_ascii_case};
 use selectors::parser::SelectorParseErrorKind;
 use std::cmp::Ordering;
 use std::fmt::{self, Write};
@@ -304,8 +304,8 @@ impl Image {
     /// Parses an image value for the Properties & Values API `<image>` syntax component.
     pub fn parse_for_registered_custom_property<'i, 't>(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Image, ParseError<'i>> {
+        input: &mut Parser,
+    ) -> Result<Image, ParseError> {
         if let Ok(image) = input.try_parse(|input| Self::parse_forbid_none(context, input)) {
             return Ok(image);
         }
@@ -316,7 +316,7 @@ impl Image {
                 "light-dark" => Self::LightDark(Box::new(GenericLightDark::parse_args_with(input, |input| {
                     Self::parse_with_cors_mode(context, input, CorsMode::None, ParseImageFlags::empty())
                 })?)),
-                _ => return Err(input.new_custom_error(StyleParseErrorKind::UnexpectedFunction(function))),
+                _ => return Err(cssparser::ParseError::custom(StyleParseErrorKind::UnexpectedFunction)),
             })
         })
     }

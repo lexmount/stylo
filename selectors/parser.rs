@@ -6,8 +6,8 @@ use crate::attr::{AttrSelectorOperator, AttrSelectorWithOptionalNamespace};
 use crate::attr::{NamespaceConstraint, ParsedAttrSelectorOperation, ParsedCaseSensitivity};
 use crate::bloom::BLOOM_HASH_MASK;
 use crate::builder::{
-    relative_selector_list_specificity_and_flags, selector_list_specificity_and_flags,
     SelectorBuilder, SelectorFlags, Specificity, SpecificityAndFlags,
+    relative_selector_list_specificity_and_flags, selector_list_specificity_and_flags,
 };
 use crate::context::QuirksMode;
 use crate::sink::Push;
@@ -3526,7 +3526,7 @@ where
         },
         "host-context" if P::parse_host(parser) => {
             if !state.allows_tree_structural_pseudo_classes() {
-                return Err(input.new_custom_error(SelectorParseErrorKind::InvalidState));
+                return Err(ParseError::custom(SelectorParseErrorKind::InvalidState));
             }
             return Ok(Component::HostContext(parse_inner_compound_selector(parser, input, state)?));
         },
@@ -3808,7 +3808,7 @@ pub mod tests {
     use super::*;
     use crate::builder::SelectorFlags;
     use crate::parser;
-    use cssparser::{serialize_identifier, Parser as CssParser, ToCss};
+    use cssparser::{Parser as CssParser, ToCss, serialize_identifier};
     use std::collections::HashMap;
     use std::fmt;
 
@@ -4246,16 +4246,20 @@ pub mod tests {
 
     #[test]
     fn test_nth_child_of_selector_list_parses_without_opt_in() {
-        assert!(parse_expected(
-            "li:nth-child(odd of .foo)",
-            Some("li:nth-child(2n+1 of .foo)")
-        )
-        .is_ok());
-        assert!(parse_expected(
-            "li:nth-last-child(2n + 1 of :not(.foo))",
-            Some("li:nth-last-child(2n+1 of :not(.foo))")
-        )
-        .is_ok());
+        assert!(
+            parse_expected(
+                "li:nth-child(odd of .foo)",
+                Some("li:nth-child(2n+1 of .foo)")
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_expected(
+                "li:nth-last-child(2n + 1 of :not(.foo))",
+                Some("li:nth-last-child(2n+1 of :not(.foo))")
+            )
+            .is_ok()
+        );
         assert!(parse("li:nth-of-type(odd of .foo)").is_err());
     }
 

@@ -4,27 +4,27 @@
 
 //! Specified types for text properties.
 
+use crate::Zero;
 use crate::derives::*;
 use crate::parser::{Parse, ParserContext};
 use crate::properties::longhands::writing_mode::computed_value::T as SpecifiedWritingMode;
 use crate::values::computed;
 use crate::values::computed::text::TextEmphasisStyle as ComputedTextEmphasisStyle;
 use crate::values::computed::{Context, ToComputedValue};
+use crate::values::generics::NumberOrAuto;
 use crate::values::generics::calc::CalcUnits;
 use crate::values::generics::text::{
     GenericHyphenateLimitChars, GenericInitialLetter, GenericTextDecorationInset,
     GenericTextDecorationLength, GenericTextIndent,
 };
-use crate::values::generics::NumberOrAuto;
 use crate::values::specified::calc::CalcNode;
 use crate::values::specified::length::{Length, LengthPercentage};
 use crate::values::specified::{AllowQuirks, Integer, NonNegativePercentage, Number};
-use crate::Zero;
 use cssparser::{Parser, Token};
 use icu_segmenter::GraphemeClusterSegmenter;
 use std::fmt::{self, Write};
-use style_traits::values::specified::AllowedNumericType;
 use style_traits::values::SequenceWriter;
+use style_traits::values::specified::AllowedNumericType;
 use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss};
 use style_traits::{KeywordsCollectFn, SpecifiedValueInfo};
 
@@ -148,10 +148,7 @@ impl TextSizeAdjust {
 }
 
 impl Parse for TextSizeAdjust {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         if input.try_parse(|i| i.expect_ident_matching("auto")).is_ok() {
             return Ok(Self::Auto);
         }
@@ -163,20 +160,24 @@ impl Parse for TextSizeAdjust {
         }
 
         let start = input.position();
-        let location = input.current_source_location();
+        let _location = input.current_source_location();
         let Token::Function(ref name) = *input.next()? else {
-            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(cssparser::ParseError::custom(
+                StyleParseErrorKind::UnspecifiedError,
+            ));
         };
-        let function = CalcNode::math_function(context, name, location)?;
+        let function = CalcNode::math_function(context, name)?;
         let calc =
             CalcNode::parse_percentage(context, input, AllowedNumericType::NonNegative, function)?;
         if calc
             .node
             .unit()
-            .map_err(|()| input.new_custom_error(StyleParseErrorKind::UnspecifiedError))?
+            .map_err(|()| cssparser::ParseError::custom(StyleParseErrorKind::UnspecifiedError))?
             != CalcUnits::PERCENTAGE
         {
-            return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+            return Err(cssparser::ParseError::custom(
+                StyleParseErrorKind::UnspecifiedError,
+            ));
         }
         Ok(Self::Dynamic(
             input.slice_from(start).trim().to_owned().into(),

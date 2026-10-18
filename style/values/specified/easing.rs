@@ -12,7 +12,7 @@ use crate::values::generics::easing::{StepPosition, TimingKeyword};
 use crate::values::specified::number::parse_number_with_clamping_mode;
 use crate::values::specified::percentage::ToPercentage;
 use crate::values::specified::{AnimationName, Integer, Number, Percentage};
-use cssparser::{match_ignore_ascii_case, Delimiter, Parser, Token};
+use cssparser::{Delimiter, Parser, Token, match_ignore_ascii_case};
 use selectors::parser::SelectorParseErrorKind;
 use style_traits::values::specified::AllowedNumericType;
 use style_traits::{ParseError, StyleParseErrorKind};
@@ -52,13 +52,23 @@ impl Parse for TimingFunction {
 impl TimingFunction {
     fn parse_cubic_bezier<'i, 't>(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
-        let x1 = parse_number_with_clamping_mode(context, input, AllowedNumericType::ZeroToOne)?;
+        input: &mut Parser,
+    ) -> Result<Self, ParseError> {
+        let x1 = parse_number_with_clamping_mode(
+            context,
+            input,
+            AllowedNumericType::ZeroToOne,
+            super::calc::PercentageContext::not_allowed(),
+        )?;
         input.expect_comma()?;
         let y1 = Number::parse(context, input)?;
         input.expect_comma()?;
-        let x2 = parse_number_with_clamping_mode(context, input, AllowedNumericType::ZeroToOne)?;
+        let x2 = parse_number_with_clamping_mode(
+            context,
+            input,
+            AllowedNumericType::ZeroToOne,
+            super::calc::PercentageContext::not_allowed(),
+        )?;
         input.expect_comma()?;
         let y2 = Number::parse(context, input)?;
 
@@ -77,7 +87,9 @@ impl TimingFunction {
         // jump-none accepts a positive integer greater than 1.
         if position == StepPosition::JumpNone {
             if steps.get().is_some_and(|steps| steps <= 1) || steps.resolved_calc_is_nan() {
-                return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+                return Err(cssparser::ParseError::custom(
+                    StyleParseErrorKind::UnspecifiedError,
+                ));
             }
         }
         Ok(GenericTimingFunction::Steps(steps, position))

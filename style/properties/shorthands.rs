@@ -10,8 +10,8 @@ use crate::values::specified;
 use cssparser::Parser;
 use std::fmt::{self, Write};
 use style_traits::{
-    values::SequenceWriter, CssWriter, KeywordsCollectFn, ParseError, SpecifiedValueInfo,
-    StyleParseErrorKind, ToCss,
+    CssWriter, KeywordsCollectFn, ParseError, SpecifiedValueInfo, StyleParseErrorKind, ToCss,
+    values::SequenceWriter,
 };
 
 macro_rules! expanded {
@@ -643,87 +643,13 @@ pub mod vertical_align {
     }
 }
 
-pub mod page_break_before {
-    use super::*;
-    pub use crate::properties::generated::shorthands::page_break_before::*;
-
-    use crate::values::specified::BreakBetween;
-
-    pub fn parse_value<'i>(
-        context: &ParserContext,
-        input: &mut Parser<'i, '_>,
-    ) -> Result<Longhands, ParseError<'i>> {
-        Ok(expanded! {
-            break_before: BreakBetween::parse_legacy(context, input)?,
-        })
-    }
-
-    impl<'a> ToCss for LonghandsToSerialize<'a> {
-        fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
-        where
-            W: fmt::Write,
-        {
-            self.break_before.to_css_legacy(dest)
-        }
-    }
-}
-
-pub mod page_break_after {
-    pub use crate::properties::generated::shorthands::page_break_after::*;
-
-    use super::*;
-    use crate::values::specified::BreakBetween;
-
-    pub fn parse_value<'i>(
-        context: &ParserContext,
-        input: &mut Parser<'i, '_>,
-    ) -> Result<Longhands, ParseError<'i>> {
-        Ok(expanded! {
-            break_after: BreakBetween::parse_legacy(context, input)?,
-        })
-    }
-
-    impl<'a> ToCss for LonghandsToSerialize<'a> {
-        fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
-        where
-            W: fmt::Write,
-        {
-            self.break_after.to_css_legacy(dest)
-        }
-    }
-}
-
-pub mod page_break_inside {
-    use super::*;
-    pub use crate::properties::generated::shorthands::page_break_inside::*;
-    use crate::values::specified::BreakWithin;
-
-    pub fn parse_value<'i>(
-        context: &ParserContext,
-        input: &mut Parser<'i, '_>,
-    ) -> Result<Longhands, ParseError<'i>> {
-        Ok(expanded! {
-            break_inside: BreakWithin::parse_legacy(context, input)?,
-        })
-    }
-
-    impl<'a> ToCss for LonghandsToSerialize<'a> {
-        fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
-        where
-            W: fmt::Write,
-        {
-            self.break_inside.to_css_legacy(dest)
-        }
-    }
-}
-
 pub mod offset {
     use super::*;
+    use crate::Zero;
     pub use crate::properties::generated::shorthands::offset::*;
     use crate::values::specified::{
         LengthPercentage, OffsetPath, OffsetPosition, OffsetRotate, PositionOrAuto,
     };
-    use crate::Zero;
 
     pub fn parse_value(
         context: &ParserContext,
@@ -1527,8 +1453,8 @@ pub mod grid_row {
     pub use crate::properties::generated::shorthands::grid_row::*;
 
     use super::*;
-    use crate::values::specified::GridLine;
     use crate::Zero;
+    use crate::values::specified::GridLine;
 
     pub fn parse_value(
         context: &ParserContext,
@@ -1571,8 +1497,8 @@ pub mod grid_column {
     pub use crate::properties::generated::shorthands::grid_column::*;
 
     use super::*;
-    use crate::values::specified::GridLine;
     use crate::Zero;
+    use crate::values::specified::GridLine;
 
     pub fn parse_value(
         context: &ParserContext,
@@ -1615,8 +1541,8 @@ pub mod grid_area {
     pub use crate::properties::generated::shorthands::grid_area::*;
 
     use super::*;
-    use crate::values::specified::GridLine;
     use crate::Zero;
+    use crate::values::specified::GridLine;
 
     pub fn parse_value(
         context: &ParserContext,
@@ -1702,8 +1628,8 @@ pub mod position_try {
 
     pub fn parse_value(
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Longhands, ParseError<'i>> {
+        input: &mut Parser,
+    ) -> Result<Longhands, ParseError> {
         #[cfg(feature = "gecko")]
         let order =
             if static_prefs::pref!("layout.css.anchor-positioning.position-try-order.enabled") {
@@ -1740,30 +1666,6 @@ pub mod position_try {
             self.position_try_fallbacks.to_css(dest)
         }
     }
-}
-
-fn timeline_to_css<W>(
-    name: &[specified::TimelineName],
-    axes: &[specified::ScrollAxis],
-    dest: &mut CssWriter<W>,
-) -> fmt::Result
-where
-    W: fmt::Write,
-{
-    if name.len() != axes.len() {
-        return Ok(());
-    }
-    for (i, (name, axis)) in std::iter::zip(name.iter(), axes.iter()).enumerate() {
-        if i != 0 {
-            dest.write_str(", ")?;
-        }
-        name.to_css(dest)?;
-        if !axis.is_default() {
-            dest.write_char(' ')?;
-            axis.to_css(dest)?;
-        }
-    }
-    Ok(())
 }
 
 pub mod scroll_timeline {
@@ -2236,8 +2138,8 @@ pub mod background_position {
 
     use super::*;
     use crate::properties::longhands::{background_position_x, background_position_y};
-    use crate::values::specified::position::Position;
     use crate::values::specified::AllowQuirks;
+    use crate::values::specified::position::Position;
 
     pub fn parse_value(
         context: &ParserContext,
@@ -2568,9 +2470,9 @@ pub mod font {
     use crate::properties::longhands::{font_family, font_size, font_size_adjust};
     use crate::properties::longhands::{
         font_feature_settings, font_kerning, font_language_override, font_optical_sizing,
-        font_width, font_style, font_variant_alternates, font_variant_caps,
-        font_variant_east_asian, font_variant_emoji, font_variant_ligatures, font_variant_numeric,
-        font_variant_position, font_variation_settings, font_weight,
+        font_style, font_variant_alternates, font_variant_caps, font_variant_east_asian,
+        font_variant_emoji, font_variant_ligatures, font_variant_numeric, font_variant_position,
+        font_variation_settings, font_weight, font_width,
     };
     #[cfg(feature = "gecko")]
     use crate::values::specified::font::SystemFont;
@@ -2644,11 +2546,7 @@ pub mod font {
 
         #[inline]
         fn count<T>(opt: &Option<T>) -> u8 {
-            if opt.is_some() {
-                1
-            } else {
-                0
-            }
+            if opt.is_some() { 1 } else { 0 }
         }
 
         if (count(&style) + count(&weight) + count(&variant_caps) + count(&width) + nb_normals) > 4
@@ -3487,11 +3385,11 @@ pub mod animation {
         where
             W: fmt::Write,
         {
+            use crate::Zero;
             use crate::values::specified::easing::TimingFunction;
             use crate::values::specified::{
                 AnimationDirection, AnimationFillMode, AnimationPlayState,
             };
-            use crate::Zero;
             use style_traits::values::SequenceWriter;
 
             let len = self.animation_name.0.len();
@@ -3957,8 +3855,8 @@ pub mod grid_template {
 
     use super::*;
     use crate::parser::Parse;
-    use crate::values::generics::grid::{concat_serialize_idents, TrackListValue};
     use crate::values::generics::grid::{TrackList, TrackSize};
+    use crate::values::generics::grid::{TrackListValue, concat_serialize_idents};
     use crate::values::specified::grid::parse_line_names;
     use crate::values::specified::position::{
         GridTemplateAreas, TemplateAreasArc, TemplateAreasParser,

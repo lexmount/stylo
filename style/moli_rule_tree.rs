@@ -2,12 +2,12 @@
 
 use std::{
     borrow::Cow,
-    sync::{atomic::AtomicBool, Once},
+    sync::{Once, OnceLock, atomic::AtomicBool},
 };
 
 use cssparser::{
-    CowRcStr, DeclarationParser, Parser, ParserInput, ParserState, RuleBodyItemParser,
-    RuleBodyParser, SourceLocation, ToCss as CssParserToCss,
+    CowRcStr, DeclarationParser, Parser, ParserState, RuleBodyItemParser, RuleBodyParser,
+    SourceLocation, ToCss as CssParserToCss,
 };
 use servo_arc::Arc;
 use style_traits::{
@@ -21,17 +21,18 @@ use crate::{
     media_queries::MediaList,
     parser::{Parse, ParserContext},
     properties::{
-        parse_one_declaration_into, Importance, PropertyDeclarationBlock, PropertyId,
-        SourcePropertyDeclaration,
+        Importance, PropertyDeclarationBlock, PropertyId, SourcePropertyDeclaration,
+        parse_one_declaration_into,
     },
     shared_lock::{SharedRwLock, ToCssWithGuard},
     stylesheets::{
+        AllowImportRules, CssRule, CssRuleType, CssRuleTypes, CssRules, MarginRule, MarginRuleType,
+        Namespaces, Origin, PageRule, PageSelectors, RulesMutateError, Stylesheet,
+        StylesheetContents, StylesheetLoader, UrlExtraData,
         font_feature_values_rule::{FFVDeclaration, PairValues, SingleValue, VectorValues},
         import_rule::{ImportLayer, ImportRule, ImportSheet, ImportSupportsCondition},
         keyframes_rule::{Keyframe, KeyframeSelectors},
-        parse_nested_rule_block, AllowImportRules, CssRule, CssRuleType, CssRuleTypes, CssRules,
-        MarginRule, MarginRuleType, Namespaces, Origin, PageRule, PageSelectors, RulesMutateError,
-        Stylesheet, StylesheetContents, StylesheetLoader, UrlExtraData,
+        parse_nested_rule_block,
     },
     values::CssUrl,
 };
@@ -138,7 +139,14 @@ pub struct CssPageDescriptorEntryView {
 }
 
 pub fn font_face_descriptor_names() -> &'static [&'static str] {
-    DescriptorId::names()
+    static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        DescriptorId::names()
+            .iter()
+            .copied()
+            .chain(["font-stretch"])
+            .collect()
+    })
 }
 
 pub fn parse_font_face_cssom_descriptor_entry(
@@ -151,8 +159,8 @@ pub fn parse_font_face_cssom_descriptor_entry(
     }
     let value = with_font_face_descriptor_context(|context| {
         let mut rule = FontFaceRule::empty(SourceLocation { line: 0, column: 0 });
-        let mut input = ParserInput::new(value);
-        let mut input = Parser::new(&mut input);
+        let input = value;
+        let mut input = Parser::new(input);
         rule.descriptors
             .set(descriptor_id, context, &mut input)
             .map_err(|_| CssRuleInsertError::Syntax)?;
@@ -164,7 +172,11 @@ pub fn parse_font_face_cssom_descriptor_entry(
     })
     .ok()?;
     Some(CssFontFaceDescriptorEntryView {
-        name: descriptor_id.name().to_owned(),
+        name: match descriptor_id.name() {
+            "font-width" => "font-stretch",
+            name => name,
+        }
+        .to_owned(),
         value,
     })
 }
@@ -310,8 +322,8 @@ pub fn parse_font_face_cssom_rule_with_context(
     descriptor_text: &str,
 ) -> Result<FontFaceRule, CssRuleInsertError> {
     let mut rule = FontFaceRule::empty(SourceLocation { line: 0, column: 0 });
-    let mut input = ParserInput::new(descriptor_text);
-    let mut input = Parser::new(&mut input);
+    let input = descriptor_text;
+    let mut input = Parser::new(input);
     {
         let mut parser = CssomFontFaceDescriptorParser {
             context,
@@ -387,7 +399,7 @@ pub fn parse_page_margin_descriptor_block(
     margin_name: &str,
     descriptor_text: &str,
 ) -> Option<String> {
-    let rule_type = MarginRuleType::match_name(margin_name)?;
+    let rule_type = MarginRuleType::from_name(margin_name)?;
     let block =
         parse_page_margin_declaration_block_for_rule_type(rule_type, descriptor_text).ok()?;
     Some(declaration_block_css_text(&block))
@@ -782,8 +794,8 @@ pub fn normalize_page_selector_text(selector_text: &str) -> Option<String> {
         None,
         AttrTaint::default(),
     );
-    let mut input = ParserInput::new(selector_text);
-    let mut input = Parser::new(&mut input);
+    let input = selector_text;
+    let mut input = Parser::new(input);
     let selectors = input
         .parse_entirely(|input| PageSelectors::parse(&context, input))
         .ok()?;
@@ -1019,16 +1031,16 @@ struct CssomFontFaceDescriptorParser<'a, 'b: 'a> {
 impl<'a, 'b, 'i> cssparser::AtRuleParser<'i> for CssomFontFaceDescriptorParser<'a, 'b> {
     type Prelude = ();
     type AtRule = ();
-    type Error = StyleParseErrorKind<'i>;
+    type Error = StyleParseErrorKind;
 }
 
 impl<'a, 'b, 'i> cssparser::QualifiedRuleParser<'i> for CssomFontFaceDescriptorParser<'a, 'b> {
     type Prelude = ();
     type QualifiedRule = ();
-    type Error = StyleParseErrorKind<'i>;
+    type Error = StyleParseErrorKind;
 }
 
-impl<'a, 'b, 'i> RuleBodyItemParser<'i, (), StyleParseErrorKind<'i>>
+impl<'a, 'b, 'i> RuleBodyItemParser<'i, (), StyleParseErrorKind>
     for CssomFontFaceDescriptorParser<'a, 'b>
 {
     fn parse_qualified(&self) -> bool {
@@ -1042,16 +1054,18 @@ impl<'a, 'b, 'i> RuleBodyItemParser<'i, (), StyleParseErrorKind<'i>>
 
 impl<'a, 'b, 'i> DeclarationParser<'i> for CssomFontFaceDescriptorParser<'a, 'b> {
     type Declaration = ();
-    type Error = StyleParseErrorKind<'i>;
+    type Error = StyleParseErrorKind;
 
     fn parse_value<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser,
         _declaration_start: &ParserState,
-    ) -> Result<(), ParseError<'i>> {
+    ) -> Result<(), ParseError> {
         let Ok(id) = DescriptorId::from_ident(name.as_ref()) else {
-            return Err(input.new_custom_error(StyleParseErrorKind::UnexpectedIdent(name.clone())));
+            return Err(cssparser::ParseError::custom(
+                StyleParseErrorKind::UnexpectedIdent,
+            ));
         };
         self.rule
             .set_cssom_descriptor_declaration(id, self.context, input)?;
@@ -1176,8 +1190,8 @@ fn parse_keyframe_rules_for_mutation(
 }
 
 fn parse_keyframe_selectors(selector_text: &str) -> Option<KeyframeSelectors> {
-    let mut input = ParserInput::new(selector_text);
-    let mut input = Parser::new(&mut input);
+    let input = selector_text;
+    let mut input = Parser::new(input);
     input.parse_entirely(KeyframeSelectors::parse).ok()
 }
 
@@ -1454,8 +1468,8 @@ fn import_rule_view(
 
 fn css_url_href(url: &CssUrl) -> Option<String> {
     let css_text = url.to_css_string();
-    let mut input = ParserInput::new(&css_text);
-    let mut input = Parser::new(&mut input);
+    let input = &css_text;
+    let mut input = Parser::new(input);
     let href = input.expect_url_or_string().ok()?.as_ref().to_owned();
     input.is_exhausted().then_some(href)
 }
@@ -1835,23 +1849,23 @@ mod tests {
     };
 
     use super::{
-        delete_keyframe_rule, delete_nested_rule, font_face_descriptor_names, insert_keyframe_rule,
-        insert_nested_rule, keyframe_rule_view_from_native, keyframe_selector_texts_match,
-        normalize_keyframe_selector_text, normalize_page_selector_text, page_descriptor_names,
-        parse_condition_rule_view, parse_counter_style_rule_view,
-        parse_font_face_cssom_descriptor_block, parse_font_face_cssom_descriptor_entry,
-        parse_font_face_rule_view, parse_font_feature_values_rule_view, parse_import_rule_view,
-        parse_keyframes_rule_view, parse_layer_rule_view, parse_namespace_rule_view,
-        parse_nested_rule_block_views, parse_page_descriptor_entries,
-        parse_page_margin_descriptor_block, parse_page_margin_rule_view, parse_page_rule_view,
-        parse_property_rule_view, parse_stylesheet_rule_texts, parse_stylesheet_rule_tree,
+        CssRuleInsertError, delete_keyframe_rule, delete_nested_rule, font_face_descriptor_names,
+        insert_keyframe_rule, insert_nested_rule, keyframe_rule_view_from_native,
+        keyframe_selector_texts_match, normalize_keyframe_selector_text,
+        normalize_page_selector_text, page_descriptor_names, parse_condition_rule_view,
+        parse_counter_style_rule_view, parse_font_face_cssom_descriptor_block,
+        parse_font_face_cssom_descriptor_entry, parse_font_face_rule_view,
+        parse_font_feature_values_rule_view, parse_import_rule_view, parse_keyframes_rule_view,
+        parse_layer_rule_view, parse_namespace_rule_view, parse_nested_rule_block_views,
+        parse_page_descriptor_entries, parse_page_margin_descriptor_block,
+        parse_page_margin_rule_view, parse_page_rule_view, parse_property_rule_view,
+        parse_stylesheet_rule_texts, parse_stylesheet_rule_tree,
         parse_stylesheet_rule_view_for_insert, parse_stylesheet_rule_views,
         refresh_stylesheet_namespaces_after_cssom_mutation, stylesheet_contents,
         stylesheet_rule_tree_counter_style_rule_view, stylesheet_rule_tree_font_face_rule_view,
         stylesheet_rule_tree_font_feature_values_rule_view, stylesheet_rule_tree_import_rule_view,
         stylesheet_rule_tree_margin_rule_view, stylesheet_rule_tree_namespace_rule_view,
         stylesheet_rule_tree_property_rule_view, stylesheet_rule_tree_rule_views,
-        CssRuleInsertError,
     };
     use crate::stylesheets::CssRuleType;
 
@@ -2575,20 +2589,22 @@ mod tests {
         assert!(Arc::ptr_eq(&stylesheet, &installed.0));
         let contents = stylesheet_contents(&stylesheet);
         let guard = stylesheet.shared_lock.read();
-        assert!(contents
-            .rules
-            .read_with(&guard)
-            .parse_rule_for_insert(
-                &stylesheet.shared_lock,
-                "svg|a { color: white; }",
-                &contents,
-                1,
-                CssRuleTypes::default(),
-                None,
-                None,
-                AllowImportRules::Yes,
-            )
-            .is_ok());
+        assert!(
+            contents
+                .rules
+                .read_with(&guard)
+                .parse_rule_for_insert(
+                    &stylesheet.shared_lock,
+                    "svg|a { color: white; }",
+                    &contents,
+                    1,
+                    CssRuleTypes::default(),
+                    None,
+                    None,
+                    AllowImportRules::Yes,
+                )
+                .is_ok()
+        );
         drop(guard);
 
         {
@@ -2598,20 +2614,22 @@ mod tests {
         refresh_stylesheet_namespaces_after_cssom_mutation(&stylesheet);
         let contents = stylesheet_contents(&stylesheet);
         let guard = stylesheet.shared_lock.read();
-        assert!(contents
-            .rules
-            .read_with(&guard)
-            .parse_rule_for_insert(
-                &stylesheet.shared_lock,
-                "svg|a { color: blue; }",
-                &contents,
-                0,
-                CssRuleTypes::default(),
-                None,
-                None,
-                AllowImportRules::Yes,
-            )
-            .is_err());
+        assert!(
+            contents
+                .rules
+                .read_with(&guard)
+                .parse_rule_for_insert(
+                    &stylesheet.shared_lock,
+                    "svg|a { color: blue; }",
+                    &contents,
+                    0,
+                    CssRuleTypes::default(),
+                    None,
+                    None,
+                    AllowImportRules::Yes,
+                )
+                .is_err()
+        );
     }
 
     #[test]

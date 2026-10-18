@@ -10,9 +10,9 @@ use crate::media_queries::MediaList;
 use crate::parser::{Parse, ParserContext};
 use crate::shared_lock::{DeepCloneWithLock, SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
 use crate::stylesheets::{
-    layer_rule::LayerName,
-    supports_rule::{parse_condition_or_declaration, SupportsCondition},
     CssRule, CssRuleType, StylesheetInDocument,
+    layer_rule::LayerName,
+    supports_rule::{SupportsCondition, parse_condition_or_declaration},
 };
 use crate::values::CssUrl;
 use cssparser::{Parser, SourceLocation};
@@ -181,7 +181,7 @@ impl ImportRule {
     pub fn parse_layer_and_supports(
         input: &mut Parser,
         context: &mut ParserContext,
-    ) -> Result<(ImportLayer, Option<ImportSupportsCondition>), ParseError<'i>> {
+    ) -> Result<(ImportLayer, Option<ImportSupportsCondition>), ParseError> {
         let layer = if input
             .try_parse(|input| input.expect_ident_matching("layer"))
             .is_ok()

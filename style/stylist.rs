@@ -4,13 +4,15 @@
 
 //! Selector matching.
 
+use crate::AllocErr;
+use crate::ArcSlice;
 use crate::applicable_declarations::{
     ApplicableDeclarationBlock, ApplicableDeclarationList, CascadePriority, ScopeProximity,
 };
 use crate::computed_value_flags::ComputedValueFlags;
 use crate::context::{CascadeInputs, QuirksMode, TreeCountingCaches};
 use crate::custom_properties::ComputedCustomProperties;
-use crate::custom_properties::{parse_name, SpecifiedValue};
+use crate::custom_properties::{SpecifiedValue, parse_name};
 use crate::derives::*;
 use crate::device::Device;
 use crate::dom::TElement;
@@ -19,18 +21,17 @@ use crate::dom::TShadowRoot;
 #[cfg(feature = "gecko")]
 use crate::gecko_bindings::structs::{ServoStyleSetSizes, StyleRuleInclusion};
 use crate::invalidation::element::invalidation_map::{
-    note_selector_for_invalidation, AdditionalRelativeSelectorInvalidationMap, Dependency,
-    DependencyInvalidationKind, InvalidationMap, ScopeDependencyInvalidationKind,
+    AdditionalRelativeSelectorInvalidationMap, Dependency, DependencyInvalidationKind,
+    InvalidationMap, ScopeDependencyInvalidationKind, note_selector_for_invalidation,
 };
 use crate::invalidation::media_queries::{
     EffectiveMediaQueryResults, MediaListKey, ToMediaListKey,
 };
 use crate::invalidation::stylesheets::{RuleChangeKind, StylesheetInvalidationSet};
 use crate::moli_invalidation::{
+    MoliChildListStructuralBoundaryDependencySummary, MoliDependencyInvalidationSummary,
     moli_dependency_summary_for_invalidation_map,
     moli_dependency_summary_for_relative_invalidation_map,
-    MoliChildListStructuralBoundaryDependencySummary,
-    MoliDependencyInvalidationSummary,
 };
 #[cfg(feature = "gecko")]
 use crate::properties::StyleBuilder;
@@ -58,15 +59,15 @@ use crate::shared_lock::{Locked, SharedRwLockReadGuard, StylesheetGuards};
 use crate::sharing::{RevalidationResult, ScopeRevalidationResult};
 use crate::stylesheet_set::{DataValidity, DocumentStylesheetSet, SheetRebuildKind};
 use crate::stylesheet_set::{DocumentStylesheetFlusher, SheetCollectionFlusher};
+use crate::stylesheets::UrlExtraData;
 use crate::stylesheets::container_rule::{ContainerAttributeDependencyKind, ContainerCondition};
 use crate::stylesheets::import_rule::ImportLayer;
 use crate::stylesheets::keyframes_rule::KeyframesAnimation;
 use crate::stylesheets::layer_rule::{LayerName, LayerOrder};
 use crate::stylesheets::scope_rule::{
-    collect_scope_roots, element_is_outside_of_scope, scope_selector_list_is_trivial,
-    ImplicitScopeRoot, ScopeRootCandidate, ScopeSubjectMap, ScopeTarget,
+    ImplicitScopeRoot, ScopeRootCandidate, ScopeSubjectMap, ScopeTarget, collect_scope_roots,
+    element_is_outside_of_scope, scope_selector_list_is_trivial,
 };
-use crate::stylesheets::UrlExtraData;
 use crate::stylesheets::{
     AllRules, CounterStyleRule, CssRule, CssRuleRef, EffectiveRules, FontFaceRule,
     FontFeatureValuesRule, FontPaletteValuesRule, NestedRuleIterationCondition, Origin, OriginSet,
@@ -77,9 +78,7 @@ use crate::stylesheets::{CustomMediaEvaluator, CustomMediaMap};
 #[cfg(feature = "gecko")]
 use crate::values::specified::position::PositionTryFallbacksItem;
 use crate::values::specified::position::PositionTryFallbacksTryTactic;
-use crate::values::{computed, AtomIdent, Parser, SourceLocation};
-use crate::AllocErr;
-use crate::ArcSlice;
+use crate::values::{AtomIdent, Parser, SourceLocation, computed};
 use crate::{Atom, LocalName, Namespace, ShrinkIfNeeded, WeakAtom};
 use dom::{DocumentState, ElementState};
 #[cfg(feature = "gecko")]
@@ -89,8 +88,8 @@ use rustc_hash::FxHashMap;
 use selectors::attr::{CaseSensitivity, NamespaceConstraint};
 use selectors::bloom::BloomFilter;
 use selectors::matching::{
-    matches_complex_selector, matches_selector, selector_may_match, MatchingContext, MatchingMode,
-    NeedsSelectorFlags, SelectorCaches, SubjectOrPseudoElement,
+    MatchingContext, MatchingMode, NeedsSelectorFlags, SelectorCaches, SubjectOrPseudoElement,
+    matches_complex_selector, matches_selector, selector_may_match,
 };
 use selectors::matching::{MatchingForInvalidation, VisitedHandlingMode};
 use selectors::parser::{
@@ -2119,8 +2118,8 @@ fn parse_custom_property_registration_fields(
 
     let initial_value = match initial_value {
         Some(value) => {
-            let mut input = ParserInput::new(value);
-            let parsed = Parser::new(&mut input)
+            let input = value;
+            let parsed = Parser::new(input)
                 .parse_entirely(|input| {
                     input.skip_whitespace();
                     SpecifiedValue::parse(input, None, url_data).map(Arc::new)
@@ -2818,9 +2817,10 @@ fn moli_note_child_list_structural_boundary_dependencies(
                 summary.note_universal_dependency();
             }
         }
-        if components.iter().any(|component| {
-            moli_component_has_nested_child_list_structural_dependency(component)
-        }) {
+        if components
+            .iter()
+            .any(|component| moli_component_has_nested_child_list_structural_dependency(component))
+        {
             // Nested selector-list structural state can change direction and
             // scope (notably through :has()). Keep this branch conservative
             // until its boundary relation is represented explicitly.
@@ -2910,8 +2910,7 @@ impl<'a> SelectorVisitor for StylistSelectorVisitor<'a> {
     }
 
     fn visit_simple_selector(&mut self, s: &Component<SelectorImpl>) -> bool {
-        *self.needs_revalidation = *self.needs_revalidation
-            || component_needs_revalidation(s, self.passed_rightmost_selector);
+        *self.needs_revalidation = *self.needs_revalidation || component_needs_revalidation(s);
         *self.has_child_list_structural_dependency = *self.has_child_list_structural_dependency
             || component_has_child_list_structural_dependency(s);
 
@@ -3776,11 +3775,8 @@ impl CascadeData {
 
     /// Returns keyed selector dependency query data for Moli style
     /// invalidation.
-    pub(crate) fn moli_dependency_invalidation_summary(
-        &self,
-    ) -> MoliDependencyInvalidationSummary {
-        let mut summary =
-            moli_dependency_summary_for_invalidation_map(&self.invalidation_map);
+    pub(crate) fn moli_dependency_invalidation_summary(&self) -> MoliDependencyInvalidationSummary {
+        let mut summary = moli_dependency_summary_for_invalidation_map(&self.invalidation_map);
         summary.extend(moli_dependency_summary_for_invalidation_map(
             &self.relative_selector_invalidation_map,
         ));
@@ -4165,9 +4161,11 @@ impl CascadeData {
                 }
             }
 
-            debug_assert!(!pseudo_elements
-                .iter()
-                .any(|p| p.is_precomputed() || p.is_unknown_webkit_pseudo_element()));
+            debug_assert!(
+                !pseudo_elements
+                    .iter()
+                    .any(|p| p.is_precomputed() || p.is_unknown_webkit_pseudo_element())
+            );
 
             let selector = match ancestor_selectors {
                 Some(s) => selector.replace_parent_selector(s),
@@ -4207,7 +4205,6 @@ impl CascadeData {
                     needs_revalidation: &mut needs_revalidation,
                     has_child_list_structural_dependency: &mut has_child_list_structural_dependency,
                     passed_rightmost_selector: false,
-                    needs_revalidation: &mut needs_revalidation,
                     non_link_visited_dependency: &mut self.non_link_visited_dependency,
                     in_selector_list_of: SelectorListKind::default(),
                     mapped_ids: &mut self.mapped_ids,
@@ -4751,7 +4748,6 @@ impl CascadeData {
                         has_child_list_structural_dependency:
                             &mut has_child_list_structural_dependency,
                         passed_rightmost_selector: true,
-                        needs_revalidation: &mut _unused,
                         non_link_visited_dependency: &mut self.non_link_visited_dependency,
                         in_selector_list_of: SelectorListKind::default(),
                         mapped_ids: &mut self.mapped_ids,

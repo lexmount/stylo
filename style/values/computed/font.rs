@@ -4,9 +4,11 @@
 
 //! Computed values for font properties
 
+use crate::Atom;
 use crate::derives::*;
 use crate::parser::{Parse, ParserContext};
 use crate::typed_om::{ToTyped, TypedValue};
+use crate::values::CSSInteger;
 use crate::values::animated::ToAnimatedValue;
 use crate::values::computed::{
     Angle, Context, Integer, Length, NonNegativeLength, NonNegativeNumber, Number, Percentage,
@@ -15,15 +17,13 @@ use crate::values::computed::{
 use crate::values::generics::font::{
     FeatureTagValue, FontSettings, TaggedFontValue, VariationValue,
 };
-use crate::values::generics::{font as generics, NonNegative};
+use crate::values::generics::{NonNegative, font as generics};
 use crate::values::resolved::{Context as ResolvedContext, ToResolvedValue};
 use crate::values::specified::font::{
     self as specified, KeywordInfo, MAX_FONT_WEIGHT, MIN_FONT_WEIGHT,
 };
 use crate::values::specified::length::{FontBaseSize, LineHeightBase};
-use crate::values::CSSInteger;
-use crate::Atom;
-use cssparser::{match_ignore_ascii_case, serialize_identifier, CssStringWriter, Parser};
+use cssparser::{CssStringWriter, Parser, match_ignore_ascii_case, serialize_identifier};
 use malloc_size_of::{MallocSizeOf, MallocSizeOfOps};
 use num_traits::abs;
 use num_traits::cast::AsPrimitive;
@@ -32,14 +32,14 @@ use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss};
 use thin_vec::ThinVec;
 
 pub use crate::values::computed::Length as MozScriptMinSize;
+pub use crate::values::specified::Integer as SpecifiedInteger;
+pub use crate::values::specified::Number as SpecifiedNumber;
 pub use crate::values::specified::font::MozScriptSizeMultiplier;
 pub use crate::values::specified::font::{FontPalette, FontSynthesis, FontSynthesisStyle};
 pub use crate::values::specified::font::{
     FontVariantAlternates, FontVariantEastAsian, FontVariantLigatures, FontVariantNumeric,
     QueryFontMetricsFlags, XLang, XTextScale,
 };
-pub use crate::values::specified::Integer as SpecifiedInteger;
-pub use crate::values::specified::Number as SpecifiedNumber;
 
 /// Generic template for font property type classes that use a fixed-point
 /// internal representation with `FRACTION_BITS` for the fractional part.
@@ -719,10 +719,7 @@ pub enum GenericFontFamily {
 }
 
 impl Parse for GenericFontFamily {
-    fn parse<'i, 't>(
-        context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self, ParseError<'i>> {
+    fn parse<'i, 't>(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         if let Ok(generic) =
             input.try_parse(|input| parse_generic_font_function(input, "generic", false))
         {
@@ -744,16 +741,16 @@ impl Parse for GenericFontFamily {
             #[cfg(feature = "gecko")]
             "math" if math_enabled(context) => Ok(Self::Math),
             "system-ui" if system_ui_enabled(context) => Ok(Self::SystemUi),
-            _ => Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError)),
+            _ => Err(cssparser::ParseError::custom(StyleParseErrorKind::UnspecifiedError)),
         }
     }
 }
 
 fn parse_generic_font_function<'i, 't>(
-    input: &mut Parser<'i, 't>,
+    input: &mut Parser,
     name: &str,
     webkit_prefixed: bool,
-) -> Result<GenericFontFamily, ParseError<'i>> {
+) -> Result<GenericFontFamily, ParseError> {
     input.expect_function_matching(name)?;
     input.parse_nested_block(|input| {
         let family = input.expect_ident_cloned()?;
@@ -766,7 +763,7 @@ fn parse_generic_font_function<'i, 't>(
             "kai" => GenericFontFamily::GenericKai,
             "khmer-mul" => GenericFontFamily::GenericKhmerMul,
             "nastaliq" => GenericFontFamily::GenericNastaliq,
-            _ => return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError)),
+            _ => return Err(cssparser::ParseError::custom(StyleParseErrorKind::UnspecifiedError)),
         };
         input.expect_exhausted()?;
         Ok(generic)

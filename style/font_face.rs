@@ -12,8 +12,8 @@ use crate::parser::{Parse, ParserContext};
 use crate::shared_lock::{SharedRwLockReadGuard, ToCssWithGuard};
 use crate::values::computed::FontWeight;
 use crate::values::generics::font::FontStyle as GenericFontStyle;
-use crate::values::specified::{url::SpecifiedUrl, Angle};
-use cssparser::{parse_important, Delimiter, Parser, RuleBodyParser, SourceLocation};
+use crate::values::specified::{Angle, url::SpecifiedUrl};
+use cssparser::{Delimiter, Parser, RuleBodyParser, SourceLocation, parse_important};
 use std::fmt::{self, Write};
 use style_traits::{CssStringWriter, CssWriter, ParseError, StyleParseErrorKind, ToCss};
 
@@ -217,8 +217,8 @@ impl FontFaceRule {
         &mut self,
         id: DescriptorId,
         context: &ParserContext,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<bool, ParseError<'i>> {
+        input: &mut Parser,
+    ) -> Result<bool, ParseError> {
         let value_changed = input.parse_until_before(Delimiter::Bang, |input| {
             self.descriptors.set(id, context, input)
         })?;
@@ -256,7 +256,10 @@ impl FontFaceRule {
             };
             let mut value = CssStringWriter::new();
             self.descriptors.get(id, &mut value)?;
-            dest.write_str(id.name())?;
+            dest.write_str(match id.name() {
+                "font-width" => "font-stretch",
+                name => name,
+            })?;
             dest.write_str(": ")?;
             dest.write_str(value.trim())?;
             if self.descriptor_importance & descriptor_importance_mask(id) != 0 {
@@ -407,11 +410,7 @@ pub struct ComputedFontWeightRange(pub FontWeight, pub FontWeight);
 
 #[inline]
 fn sort_range<T: PartialOrd>(a: T, b: T) -> (T, T) {
-    if a > b {
-        (b, a)
-    } else {
-        (a, b)
-    }
+    if a > b { (b, a) } else { (a, b) }
 }
 
 impl FontWeightRange {

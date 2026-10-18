@@ -7,7 +7,7 @@
 use super::{
     rule::Descriptors as PropertyDescriptors,
     syntax::{
-        data_type::DataType, Component as SyntaxComponent, ComponentName, Descriptor, Multiplier,
+        Component as SyntaxComponent, ComponentName, Descriptor, Multiplier, data_type::DataType,
     },
 };
 use crate::custom_properties::{AttrTaint, ComputedValue as ComputedPropertyValue};
@@ -17,15 +17,16 @@ use crate::properties;
 use crate::properties::{CSSWideKeyword, CustomDeclarationValue};
 use crate::stylesheets::{CssRuleType, Origin, UrlExtraData};
 use crate::values::{
+    CustomIdent,
     animated::{self, Animate, Procedure},
     computed::{self, ToComputedValue},
     resolved::ToResolvedValue,
-    specified, CustomIdent,
+    specified,
 };
 use crate::{Atom, Namespace, Prefix};
 use cssparser::{
-    serialize_identifier, BasicParseErrorKind, ParseErrorKind, Parser as CSSParser, Token,
-    TokenSerializationType,
+    BasicParseErrorKind, ParseErrorKind, Parser as CSSParser, Token, TokenSerializationType,
+    serialize_identifier,
 };
 use rustc_hash::FxHashMap;
 use selectors::matching::QuirksMode;
@@ -33,8 +34,8 @@ use servo_arc::Arc;
 use smallvec::SmallVec;
 use std::fmt::{self, Write};
 use style_traits::{
-    owned_str::OwnedStr, CssWriter, ParseError as StyleParseError, ParsingMode,
-    PropertySyntaxParseError, StyleParseErrorKind, ToCss,
+    CssWriter, ParseError as StyleParseError, ParsingMode, PropertySyntaxParseError,
+    StyleParseErrorKind, ToCss, owned_str::OwnedStr,
 };
 
 /// A single component of the computed value.
@@ -245,12 +246,12 @@ impl ToCss for SpecifiedIdentFunction {
 impl SpecifiedIdentFunction {
     pub(crate) fn parse<'i, 't>(
         context: &ParserContext,
-        input: &mut CSSParser<'i, 't>,
-    ) -> Result<Self, StyleParseError<'i>> {
+        input: &mut CSSParser,
+    ) -> Result<Self, StyleParseError> {
         let mut components = vec![];
         input.parse_nested_block(|input| {
             while !input.is_exhausted() {
-                let location = input.current_source_location();
+                let _location = input.current_source_location();
                 match *input.next()? {
                     Token::Ident(ref ident) => {
                         components.push(IdentFunctionComponent::Ident(OwnedStr::from(
@@ -271,17 +272,18 @@ impl SpecifiedIdentFunction {
                         )));
                     },
                     Token::Function(ref name) => {
-                        let function =
-                            specified::calc::CalcNode::math_function(context, name, location)?;
+                        let function = specified::calc::CalcNode::math_function(context, name)?;
                         let value =
                             specified::calc::CalcNode::parse_number_node(context, input, function)?;
                         components.push(IdentFunctionComponent::CalcNumber(value));
                     },
-                    ref token => return Err(location.new_unexpected_token_error(token.clone())),
+                    _ => return Err(StyleParseError::unexpected_token()),
                 }
             }
             if components.is_empty() {
-                return Err(input.new_custom_error(StyleParseErrorKind::UnspecifiedError));
+                return Err(cssparser::ParseError::custom(
+                    StyleParseErrorKind::UnspecifiedError,
+                ));
             }
             Ok(())
         })?;
@@ -944,8 +946,8 @@ mod tests {
     fn parse_specified_value(css: &str, syntax: &str) -> SpecifiedValue {
         let url_data = UrlExtraData::from(url::Url::parse("https://example.test/").unwrap());
         let descriptor = SyntaxDescriptor::from_str(syntax, /* save_specified = */ false).unwrap();
-        let mut input = cssparser::ParserInput::new(css);
-        let mut input = CSSParser::new(&mut input);
+        let input = css;
+        let mut input = CSSParser::new(input);
         SpecifiedValue::parse(
             &mut input,
             &descriptor,

@@ -22,9 +22,9 @@ use crate::stylesheets::{CssRules, CustomMediaEvaluator};
 use crate::stylist::Stylist;
 use crate::values::computed::{CSSPixelLength, ContainerType, Context, Ratio};
 use crate::values::specified::ContainerName;
-use crate::{derives::*, LocalName};
+use crate::{LocalName, derives::*};
 use app_units::Au;
-use cssparser::{Parser, ParserInput, SourceLocation};
+use cssparser::{Parser, SourceLocation};
 use euclid::default::Size2D;
 #[cfg(feature = "gecko")]
 use malloc_size_of::{MallocSizeOfOps, MallocUnconditionalShallowSizeOf};
@@ -125,10 +125,7 @@ impl ContainerAttributeDependencyKind {
 
 impl ContainerConditions {
     /// Parse a full @container rule prelude.
-    pub fn parse<'i>(
-        context: &ParserContext,
-        input: &mut Parser<'i, '_>,
-    ) -> Result<Self, ParseError<'i>> {
+    pub fn parse<'i>(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {
         let conditions =
             input.parse_comma_separated(|input| ContainerCondition::parse(context, input))?;
         // Container rules must have at least one condition.
@@ -138,8 +135,8 @@ impl ContainerConditions {
 
     /// Parse and serialize a full @container rule prelude.
     pub fn parse_to_css_string(context: &ParserContext, prelude: &str) -> Option<String> {
-        let mut input = ParserInput::new(prelude);
-        let mut input = Parser::new(&mut input);
+        let input = prelude;
+        let mut input = Parser::new(input);
         let conditions = input
             .parse_entirely(|input| Self::parse(context, input))
             .ok()?;

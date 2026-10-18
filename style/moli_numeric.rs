@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 use std::sync::Once;
 
-use cssparser::{Parser, ParserInput, Token};
+use cssparser::{Parser, Token};
 use style_traits::ParsingMode;
 
 use crate::{
@@ -18,9 +18,9 @@ use crate::{
     values::{
         generics::calc::{CalcUnits, MinMaxOp, ModRemOp, RoundingStrategy},
         specified::{
+            NoCalcLength, TreeCountingFunction as StyloTreeCountingFunction,
             calc::{CalcNode, CalcParseFlags, Leaf as CalcLeaf},
             length::LengthUnit,
-            NoCalcLength, TreeCountingFunction as StyloTreeCountingFunction,
         },
     },
 };
@@ -379,17 +379,20 @@ fn parse_stylo_numeric_node(raw: &str, units: CalcUnits) -> Option<CalcNode> {
     // boundary without unpacking NumericUnion's private storage variants.
     let wrapped = format!("calc({})", raw.trim());
     with_stylo_numeric_context(ParsingMode::DEFAULT, |context| {
-        let mut input = ParserInput::new(&wrapped);
-        let mut parser = Parser::new(&mut input);
-        let location = parser.current_source_location();
+        let input = &wrapped;
+        let mut parser = Parser::new(input);
+        let _location = parser.current_source_location();
         let token = parser.next().ok()?.clone();
         let Token::Function(name) = token else {
             return None;
         };
-        let function = CalcNode::math_function(context, &name, location).ok()?;
+        let function = CalcNode::math_function(context, &name).ok()?;
         let node =
             CalcNode::parse(context, &mut parser, function, CalcParseFlags::new(units)).ok()?;
         parser.expect_exhausted().ok()?;
+        if !units.contains(node.unit().ok()?) {
+            return None;
+        }
         Some(node)
     })?
 }
@@ -691,14 +694,14 @@ fn resolve_no_calc_length(length: &NoCalcLength, context: CssNumericContext) -> 
 }
 
 pub fn starts_with_supported_math_function(raw: &str) -> bool {
-    let mut input = ParserInput::new(raw.trim());
-    let mut parser = Parser::new(&mut input);
+    let input = raw.trim();
+    let mut parser = Parser::new(input);
     with_stylo_numeric_context(ParsingMode::DEFAULT, |context| {
-        let location = parser.current_source_location();
+        let _location = parser.current_source_location();
         matches!(
             parser.next(),
             Ok(Token::Function(name))
-                if CalcNode::math_function(context, name, location).is_ok()
+                if CalcNode::math_function(context, name).is_ok()
         )
     })
     .unwrap_or(false)
@@ -707,11 +710,11 @@ pub fn starts_with_supported_math_function(raw: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        css_number_value_is_supported, css_time_value_is_supported, parse_angle_degrees,
-        parse_number, parse_px_length, resolve_css_number, resolve_css_numeric,
-        resolve_length_percentage, resolve_time_seconds, starts_with_supported_math_function,
         ContainerQueryLengthContext, CssNumericContext, CssNumericKind, CssNumericValue,
-        UnitlessAngle, UnitlessLength,
+        UnitlessAngle, UnitlessLength, css_number_value_is_supported, css_time_value_is_supported,
+        parse_angle_degrees, parse_number, parse_px_length, resolve_css_number,
+        resolve_css_numeric, resolve_length_percentage, resolve_time_seconds,
+        starts_with_supported_math_function,
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -719,6 +722,48 @@ mod tests {
             (actual - expected).abs() < 1e-5,
             "expected {actual} to be close to {expected}"
         );
+    }
+
+    #[test]
+    fn percentage_math_keeps_specified_css_and_resolves_its_value() {
+        use crate::parser::Parse;
+        use crate::values::specified::Percentage;
+        use cssparser::Parser;
+        use style_traits::{ParsingMode, ToCss};
+
+        super::with_stylo_numeric_context(ParsingMode::DEFAULT, |context| {
+            let mut input = Parser::new("clamp(50%, 80%, 70%)");
+            let value = Percentage::parse(context, &mut input).unwrap();
+            input.expect_exhausted().unwrap();
+            assert_eq!(value.to_css_string(), "clamp(50%, 80%, 70%)");
+            assert_eq!(value.resolve(), Some(0.7));
+            assert_eq!(value.to_css_string(), "clamp(50%, 80%, 70%)");
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn web_exposed_calc_division_requires_number_denominator() {
+        use crate::parser::Parse;
+        use crate::values::specified::LengthPercentage;
+        use cssparser::Parser;
+        use style_traits::ParsingMode;
+
+        super::with_stylo_numeric_context(ParsingMode::DEFAULT, |context| {
+            for (css, valid) in [
+                ("calc(5px / 2)", true),
+                ("calc((10% + 1em) * 0.5)", true),
+                ("calc(5px / 1px)", false),
+                ("calc(5px * 10lh / 1px)", false),
+                ("calc(1em / 1rem * 1px)", false),
+            ] {
+                let mut input = Parser::new(css);
+                let parsed = LengthPercentage::parse(context, &mut input)
+                    .and_then(|value| input.expect_exhausted().map(|_| value).map_err(Into::into));
+                assert_eq!(parsed.is_ok(), valid, "{css}");
+            }
+        })
+        .unwrap();
     }
 
     #[test]
@@ -807,12 +852,14 @@ mod tests {
             .unwrap(),
             50.0,
         );
-        assert!(resolve_css_numeric(
-            "calc(50px - 50%)",
-            CssNumericKind::Percentage,
-            CssNumericContext::supports_probe(),
-        )
-        .is_none());
+        assert!(
+            resolve_css_numeric(
+                "calc(50px - 50%)",
+                CssNumericKind::Percentage,
+                CssNumericContext::supports_probe(),
+            )
+            .is_none()
+        );
     }
 
     #[test]
