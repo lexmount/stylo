@@ -463,6 +463,9 @@ impl Stylesheet {
         mut sanitization_data: Option<&mut SanitizationData>,
     ) -> (Namespaces, Vec<CssRule>, Option<String>, Option<String>) {
         let mut input = Parser::new(css);
+        // cssparser's default of 75 nested blocks truncates valid deep @scope
+        // sheets. Preserve browser stylesheet nesting while retaining a bound.
+        input.set_nested_block_limit(128);
 
         let context = ParserContext::new(
             origin,

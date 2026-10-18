@@ -2006,6 +2006,24 @@ mod tests {
     }
 
     #[test]
+    fn stylesheet_rule_views_preserve_ninety_nested_scopes() {
+        let mut css = "span { color: green; }".to_owned();
+        for index in (0..90).rev() {
+            css = format!("@scope (.s{index}) {{ {css} }}");
+        }
+        let rules = parse_stylesheet_rule_views(&css);
+        let mut rule = &rules[0];
+        for _ in 0..90 {
+            assert_eq!(rule.rule_type, CssRuleType::Scope);
+            assert_eq!(rule.child_rules.len(), 1);
+            rule = &rule.child_rules[0];
+        }
+        assert_eq!(rule.rule_type, CssRuleType::Style);
+        assert_eq!(rule.selector_text.as_deref(), Some("span"));
+        assert_eq!(rule.declaration_text.as_deref(), Some("color: green;"));
+    }
+
+    #[test]
     fn stylesheet_rule_views_include_stylo_nested_children() {
         let rules = parse_stylesheet_rule_views(
             ".one { color: red; } @media screen { .two { margin: 0; } @supports (display: grid) { .three { display: grid; } } }",
