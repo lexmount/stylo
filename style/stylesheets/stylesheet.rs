@@ -19,7 +19,7 @@ use crate::stylesheets::{
 };
 use crate::use_counters::UseCounters;
 use crate::{Namespace, Prefix};
-use cssparser::{Parser, StyleSheetParser};
+use cssparser::StyleSheetParser;
 #[cfg(feature = "gecko")]
 use malloc_size_of::{MallocSizeOfOps, MallocUnconditionalShallowSizeOf};
 use rustc_hash::FxHashMap;
@@ -462,10 +462,7 @@ impl Stylesheet {
         allow_import_rules: AllowImportRules,
         mut sanitization_data: Option<&mut SanitizationData>,
     ) -> (Namespaces, Vec<CssRule>, Option<String>, Option<String>) {
-        let mut input = Parser::new(css);
-        // cssparser's default of 75 nested blocks truncates valid deep @scope
-        // sheets. Preserve browser stylesheet nesting while retaining a bound.
-        input.set_nested_block_limit(128);
+        let mut input = super::rule_parser::stylesheet_parser(css);
 
         let context = ParserContext::new(
             origin,

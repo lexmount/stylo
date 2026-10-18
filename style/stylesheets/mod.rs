@@ -42,7 +42,7 @@ use crate::parser::{NestingContext, ParserContext};
 use crate::properties::{parse_property_declaration_list, PropertyDeclarationBlock};
 use crate::shared_lock::{DeepCloneWithLock, Locked};
 use crate::shared_lock::{SharedRwLock, SharedRwLockReadGuard, ToCssWithGuard};
-use cssparser::{parse_one_rule, Parser};
+use cssparser::parse_one_rule;
 #[cfg(feature = "gecko")]
 use malloc_size_of::{MallocSizeOfOps, MallocUnconditionalShallowSizeOf};
 use servo_arc::Arc;
@@ -762,7 +762,7 @@ impl CssRule {
             insert_rule_context.max_rule_state_at_index(index - 1)
         };
 
-        let mut input = Parser::new(css);
+        let mut input = rule_parser::stylesheet_parser(css);
 
         // nested rules are in the body state
         let mut parser = TopLevelRuleParser {

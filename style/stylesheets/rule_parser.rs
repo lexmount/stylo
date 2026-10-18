@@ -240,6 +240,14 @@ pub enum State {
     Body = 5,
 }
 
+/// Construct a bounded stylesheet parser for both loading and CSSOM mutation.
+pub(crate) fn stylesheet_parser(css: &str) -> Parser<'_> {
+    let mut input = Parser::new(css);
+    // cssparser's default 75 blocks truncates valid deep @scope sheets.
+    input.set_nested_block_limit(128);
+    input
+}
+
 pub(crate) fn parse_nested_rule_block(
     css: &str,
     rule_type: CssRuleType,
@@ -264,8 +272,7 @@ pub(crate) fn parse_nested_rule_block(
     );
     context.nesting_context = NestingContext::new(containing_rule_types, parse_relative_rule_type);
 
-    let input = css;
-    let mut input = Parser::new(input);
+    let mut input = stylesheet_parser(css);
     let mut parser = TopLevelRuleParser {
         context,
         shared_lock,

@@ -2011,16 +2011,21 @@ mod tests {
         for index in (0..90).rev() {
             css = format!("@scope (.s{index}) {{ {css} }}");
         }
-        let rules = parse_stylesheet_rule_views(&css);
-        let mut rule = &rules[0];
-        for _ in 0..90 {
-            assert_eq!(rule.rule_type, CssRuleType::Scope);
-            assert_eq!(rule.child_rules.len(), 1);
-            rule = &rule.child_rules[0];
+        let inserted = parse_stylesheet_rule_view_for_insert(&[], &css, 0, false).unwrap();
+        let nested = parse_nested_rule_block_views(
+            &[], &css, CssRuleType::Media, CssRuleType::Media.bit(), None, false,
+        ).unwrap();
+        for rules in [parse_stylesheet_rule_views(&css), vec![inserted], nested.rules] {
+            let mut rule = &rules[0];
+            for _ in 0..90 {
+                assert_eq!(rule.rule_type, CssRuleType::Scope);
+                assert_eq!(rule.child_rules.len(), 1);
+                rule = &rule.child_rules[0];
+            }
+            assert_eq!(rule.rule_type, CssRuleType::Style);
+            assert_eq!(rule.selector_text.as_deref(), Some("span"));
+            assert_eq!(rule.declaration_text.as_deref(), Some("color: green;"));
         }
-        assert_eq!(rule.rule_type, CssRuleType::Style);
-        assert_eq!(rule.selector_text.as_deref(), Some("span"));
-        assert_eq!(rule.declaration_text.as_deref(), Some("color: green;"));
     }
 
     #[test]
