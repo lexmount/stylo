@@ -756,11 +756,13 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 NumericType::length().with_percent_hint(NumericBaseType::Length)
             },
             CalcNode::Sin(child) | CalcNode::Cos(child) | CalcNode::Tan(child) => {
-                let child_ty = child.numeric_type_as_calc_type()?;
-                if child_ty != CalcType::Number && child_ty != CalcType::Angle {
+                let child_ty = child.numeric_type()?;
+                // An angle with a length percentage hint is not an <angle>.
+                // Classifying exponents alone would erase this distinction.
+                if !child_ty.is_number() && !child_ty.matches_angle() {
                     return Err(());
                 }
-                NumericType::number()
+                NumericType::number().make_consistent_with(&child_ty)?
             },
             CalcNode::Asin(child) | CalcNode::Acos(child) | CalcNode::Atan(child) => {
                 if child.numeric_type_as_calc_type()? != CalcType::Number {
@@ -772,8 +774,8 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
                 // Ensure that the types of a and b can be made consistent
                 let a_ty = a.numeric_type()?;
                 let b_ty = b.numeric_type()?;
-                let _ = NumericType::add_two_types(&a_ty, &b_ty)?;
-                NumericType::angle()
+                let input_ty = NumericType::add_two_types(&a_ty, &b_ty)?;
+                NumericType::angle().make_consistent_with(&input_ty)?
             },
             CalcNode::Pow(a, b) => {
                 let a_ty = a.numeric_type_as_calc_type()?;
@@ -1442,30 +1444,36 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
             },
             Self::Sin(c) => {
                 let (value, ty) = c.resolve_internal(leaf_to_output_fn)?;
-                let radians = match ty.as_calc_type()? {
-                    CalcType::Number => value,
-                    CalcType::Angle => value.to_radians(),
-                    _ => return Err(()),
+                let radians = if ty.is_number() {
+                    value
+                } else if ty.matches_angle() {
+                    value.to_radians()
+                } else {
+                    return Err(());
                 };
-                Ok((radians.sin(), NumericType::number()))
+                Ok((radians.sin(), NumericType::number().make_consistent_with(&ty)?))
             },
             Self::Cos(c) => {
                 let (value, ty) = c.resolve_internal(leaf_to_output_fn)?;
-                let radians = match ty.as_calc_type()? {
-                    CalcType::Number => value,
-                    CalcType::Angle => value.to_radians(),
-                    _ => return Err(()),
+                let radians = if ty.is_number() {
+                    value
+                } else if ty.matches_angle() {
+                    value.to_radians()
+                } else {
+                    return Err(());
                 };
-                Ok((radians.cos(), NumericType::number()))
+                Ok((radians.cos(), NumericType::number().make_consistent_with(&ty)?))
             },
             Self::Tan(c) => {
                 let (value, ty) = c.resolve_internal(leaf_to_output_fn)?;
-                let radians = match ty.as_calc_type()? {
-                    CalcType::Number => value,
-                    CalcType::Angle => value.to_radians(),
-                    _ => return Err(()),
+                let radians = if ty.is_number() {
+                    value
+                } else if ty.matches_angle() {
+                    value.to_radians()
+                } else {
+                    return Err(());
                 };
-                Ok((radians.tan(), NumericType::number()))
+                Ok((radians.tan(), NumericType::number().make_consistent_with(&ty)?))
             },
             Self::Asin(c) => {
                 let (value, ty) = c.resolve_internal(leaf_to_output_fn)?;
@@ -1491,8 +1499,8 @@ impl<L: CalcNodeLeaf> CalcNode<L> {
             Self::Atan2(a, b) => {
                 let (a, a_ty) = a.resolve_internal(leaf_to_output_fn)?;
                 let (b, b_ty) = b.resolve_internal(leaf_to_output_fn)?;
-                let _ = NumericType::add_two_types(&a_ty, &b_ty)?;
-                Ok((a.atan2(b).to_degrees(), NumericType::angle()))
+                let input_ty = NumericType::add_two_types(&a_ty, &b_ty)?;
+                Ok((a.atan2(b).to_degrees(), NumericType::angle().make_consistent_with(&input_ty)?))
             },
             Self::Pow(a, b) => {
                 let (a, a_ty) = a.resolve_internal(leaf_to_output_fn)?;

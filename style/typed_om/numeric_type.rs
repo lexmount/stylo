@@ -243,6 +243,17 @@ impl NumericType {
         ty
     }
 
+    /// Preserve the input's percentage dependency when a math function changes units.
+    /// <https://drafts.csswg.org/css-values-4/#make-a-type-consistent>
+    pub fn make_consistent_with(mut self, input: &Self) -> Result<Self, ()> {
+        match (self.percent_hint, input.percent_hint) {
+            (Optional::Some(base), Optional::Some(input)) if base != input => return Err(()),
+            (Optional::None, hint) => self.percent_hint = hint,
+            _ => {},
+        }
+        Ok(self)
+    }
+
     /// Returns the percent hint for this type.
     pub fn percent_hint(&self) -> Optional<NumericBaseType> {
         self.percent_hint

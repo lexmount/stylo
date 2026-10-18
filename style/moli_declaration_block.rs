@@ -408,6 +408,27 @@ mod tests {
     }
 
     #[test]
+    fn trig_math_preserves_percentage_type_instead_of_accepting_number_arguments() {
+        for value in [
+            "calc(1px * pow(tan(atan2(50%, 1px)), 1))",
+            "calc(1px * sqrt(tan(atan2(50%, 1px))))",
+            "calc(1px * exp(tan(atan2(50%, 1px))))",
+        ] {
+            let mut block = CssDeclarationBlock::default();
+            assert_eq!(block.set_property("width", value, false), CssSetResult::ParseError, "{value}");
+        }
+        for value in [
+            "calc(1px * pow(tan(atan2(1px, 1px)), 1))",
+            "calc(1px * sqrt(tan(atan2(1px, 1px))))",
+            "calc(1px * sin(45deg))",
+            "calc(1px * sign(50%))",
+        ] {
+            let mut block = CssDeclarationBlock::default();
+            assert_ne!(block.set_property("width", value, false), CssSetResult::ParseError, "{value}");
+        }
+    }
+
+    #[test]
     fn declaration_block_uses_stylo_parser_and_cssom_serialization() {
         let block = parse_declaration_block(
             "width: 0; color: invalid; margin: 1px 2px; --token: a b; color: red !important;",
