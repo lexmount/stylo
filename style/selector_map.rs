@@ -860,7 +860,11 @@ fn specific_bucket_for<'a>(
                 Bucket::Universal
             }
         },
-        Component::HostContext(..) => Bucket::Universal,
+        Component::HostContext(..) => {
+            // The universal bucket cannot prove the host or ancestor argument.
+            *bucket_matches = BucketMatches::Unknown;
+            Bucket::Universal
+        },
         Component::Is(ref list) | Component::Where(ref list) => {
             if list.len() == 1 {
                 find_bucket(
@@ -1038,6 +1042,32 @@ impl<V> MaybeCaseInsensitiveHashMap<Atom, V> {
         } else {
             self.0.get(key)
         }
+    }
+}
+
+#[test]
+fn host_context_requires_matching_after_bucket_lookup() {
+    let url_data =
+        crate::stylesheets::UrlExtraData::from(url::Url::parse("https://example.test/").unwrap());
+    for text in [":host-context(:host)", ":is(:host-context(.ancestor))"] {
+        let selectors = crate::selector_parser::SelectorParser::parse_author_origin_no_namespace(
+            text, &url_data,
+        )
+        .unwrap();
+        let mut matches = BucketMatches::Full;
+        let mut disjoint = Default::default();
+        find_bucket(
+            selectors.slice()[0].iter(),
+            QuirksMode::NoQuirks,
+            &mut disjoint,
+            &mut matches,
+            false,
+        );
+        assert_eq!(
+            matches,
+            BucketMatches::Unknown,
+            "{text} must match its host and ancestor constraints"
+        );
     }
 }
 
