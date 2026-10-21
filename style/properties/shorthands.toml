@@ -498,8 +498,6 @@ sub_properties = [
   "font-kerning",
   "font-feature-settings",
   "font-language-override",
-]
-extra_gecko_sub_properties = [
   "font-size-adjust",
 ]
 spec = "https://drafts.csswg.org/css-fonts-3/#propdef-font"
