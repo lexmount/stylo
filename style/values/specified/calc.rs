@@ -291,6 +291,25 @@ impl SpecifiedValueInfo for CalcNumeric {}
 #[derive(Clone, Debug, MallocSizeOf, PartialEq, ToCss, ToShmem, ToTyped)]
 pub struct CalcLengthPercentage(pub CalcNumeric);
 
+impl CalcLengthPercentage {
+    /// Resolves a pure percentage without requiring a length basis. Any length
+    /// leaf, including zero, keeps the calculation dependent on lengths.
+    pub(crate) fn as_pure_percentage(&self) -> Option<NoCalcPercentage> {
+        let result = self.0.node.resolve_map(|leaf| match leaf {
+            Leaf::Length(_) => Err(()),
+            Leaf::Percentage(p) => Ok(Leaf::Percentage(CalcPercentageLeaf::new(
+                p.get(),
+                Optional::Some(NumericBaseType::Percent),
+            ))),
+            _ => Ok(leaf.clone()),
+        });
+        match result {
+            Ok(Leaf::Percentage(p)) => Some(p.value),
+            _ => None,
+        }
+    }
+}
+
 impl SpecifiedValueInfo for CalcLengthPercentage {}
 
 /// Should parsing anchor-positioning functions in `calc()` be allowed?
@@ -1754,6 +1773,56 @@ impl From<generic::CalcUnits> for PercentageContext {
             Self::allowed_with_hint(NumericBaseType::Length)
         } else {
             Self::allowed()
+        }
+    }
+}
+
+#[cfg(all(test, feature = "servo"))]
+mod font_percentage_tests {
+    use super::*;
+    use crate::context::QuirksMode;
+    use crate::stylesheets::{CssRuleType, Origin, UrlExtraData};
+    use crate::values::specified::LengthPercentage;
+    use style_traits::ParsingMode;
+
+    #[test]
+    fn length_hinted_percentages_preserve_font_size_dependencies() {
+        let url = UrlExtraData::from(url::Url::parse("about:blank").unwrap());
+        let context = ParserContext::new(
+            Origin::Author,
+            &url,
+            Some(CssRuleType::Style),
+            ParsingMode::DEFAULT,
+            QuirksMode::NoQuirks,
+            Default::default(),
+            None,
+            None,
+            Default::default(),
+        );
+        let percentage =
+            |css: &str| match LengthPercentage::parse_non_negative(&context, &mut Parser::new(css))
+                .unwrap()
+            {
+                LengthPercentage::Calc(calc) => calc.as_pure_percentage().map(|p| p.get()),
+                LengthPercentage::Percentage(p) => Some(p.get()),
+                LengthPercentage::Length(_) => None,
+            };
+        for css in [
+            "calc(100%)",
+            "min(100%, 125%)",
+            "max(50%, 100%)",
+            "calc(50% + 50%)",
+            "clamp(50%, 100%, 125%)",
+        ] {
+            assert_eq!(percentage(css), Some(1.0), "{css}");
+        }
+        for css in [
+            "calc(1em)",
+            "calc(100% + 0px)",
+            "calc(50% + .5em)",
+            "calc(0 * 1px + 100%)",
+        ] {
+            assert_eq!(percentage(css), None, "{css}");
         }
     }
 }

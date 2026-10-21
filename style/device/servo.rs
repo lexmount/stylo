@@ -51,6 +51,15 @@ pub trait FontMetricsProvider: Debug + Sync {
     ) -> FontMetrics;
     /// Gets the base size given a generic font family.
     fn base_size_for_generic(&self, generic: GenericFontFamily) -> Length;
+
+    /// Whether relative font sizes retain the parent's originating keyword.
+    ///
+    /// The default preserves Stylo's keyword-table scaling. Embedders matching
+    /// Blink instead resolve relative values numerically before a later change
+    /// between proportional and fixed-font defaults.
+    fn preserve_font_size_keywords_in_relative_values(&self) -> bool {
+        true
+    }
 }
 
 /// Servo media feature values supplied by the embedding runtime.
@@ -190,6 +199,13 @@ impl Device {
         self.extra
             .font_metrics_provider
             .base_size_for_generic(generic)
+    }
+
+    /// Whether relative font sizes retain the parent's originating keyword.
+    pub fn preserve_font_size_keywords_in_relative_values(&self) -> bool {
+        self.extra
+            .font_metrics_provider
+            .preserve_font_size_keywords_in_relative_values()
     }
 
     /// Whether a given animation name may be referenced from style.

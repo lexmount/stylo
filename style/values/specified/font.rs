@@ -909,12 +909,44 @@ impl FontSize {
         line_height_base: LineHeightBase,
     ) -> computed::FontSize {
         let compose_keyword = |factor| {
-            context
+            let info = context
                 .style()
                 .get_parent_font()
                 .clone_font_size()
-                .keyword_info
-                .compose(factor)
+                .keyword_info;
+            #[cfg(feature = "servo")]
+            let info = if info.kw != FontSizeKeyword::None
+                && !context
+                    .device()
+                    .preserve_font_size_keywords_in_relative_values()
+            {
+                // An explicit relative value uses the parent's numeric size,
+                // not its original keyword table entry. Retain the default-
+                // size dependency as a medium-relative value so inherited
+                // family changes still scale it, including on descendants.
+                // Absolute lengths have no keyword info and never enter here.
+                let generic = context
+                    .style()
+                    .get_parent_font()
+                    .font_family
+                    .families
+                    .single_generic()
+                    .unwrap_or(computed::GenericFontFamily::None);
+                let medium = context.device().base_size_for_generic(generic).px();
+                let zoom = context.style().effective_zoom.value();
+                if medium > 0. && zoom > 0. {
+                    KeywordInfo {
+                        kw: FontSizeKeyword::Medium,
+                        factor: base_size.resolve(context).computed_size().px() / (medium * zoom),
+                        offset: CSSPixelLength::new(0.),
+                    }
+                } else {
+                    info
+                }
+            } else {
+                info
+            };
+            info.compose(factor)
         };
         let mut info = KeywordInfo::none();
         let size =
@@ -940,6 +972,17 @@ impl FontSize {
                     (base_size.resolve(context).computed_size() * pc.get()).normalized()
                 },
                 FontSize::Length(LengthPercentage::Calc(ref calc)) => {
+                    #[cfg(feature = "servo")]
+                    if !context
+                        .device()
+                        .preserve_font_size_keywords_in_relative_values()
+                    {
+                        // A pure percentage calculation remains relative, but
+                        // a calculation with a length (even 0px) is absolute.
+                        if let Some(percentage) = calc.as_pure_percentage() {
+                            info = compose_keyword(percentage.get());
+                        }
+                    }
                     let calc = calc.to_computed_value_zoomed(context, base_size, line_height_base);
                     calc.resolve(base_size.resolve(context).computed_size())
                 },
