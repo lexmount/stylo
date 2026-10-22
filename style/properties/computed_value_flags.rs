@@ -137,6 +137,15 @@ bitflags! {
 
         /// Whether this style uses `sibling-index()`.
         const USES_SIBLING_INDEX = 1 << 27;
+
+        /// Whether the winning `visibility` declaration establishes a value
+        /// on this element instead of inheriting from its parent.
+        ///
+        /// This is set after variable substitution and cascade rollback have
+        /// selected the declaration, so consumers do not need to replay the
+        /// cascade to distinguish an inherited hidden value from an explicit
+        /// hidden boundary.
+        const HAS_OWN_VISIBILITY = 1 << 28;
     }
 }
 
