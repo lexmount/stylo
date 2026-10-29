@@ -2195,6 +2195,15 @@ spec = "https://drafts.csswg.org/css-transforms-2/#individual-transforms"
 servo_restyle_damage = "recalculate_overflow"
 affects = "overflow"
 
+[-webkit-user-drag]
+struct = "ui"
+engine = "servo"
+keyword = { values = ["auto", "none", "element"] }
+animation_type = "discrete"
+spec = "Nonstandard (https://github.com/WebKit/WebKit/blob/main/Source/WebCore/css/CSSProperties.json)"
+servo_restyle_damage = "repaint"
+affects = "paint"
+
 [user-select]
 type = "UserSelect"
 initial = "computed::UserSelect::Auto"
