@@ -894,6 +894,7 @@ class PropertiesData(object):
         self.shorthand_aliases = []
         self.counted_unknown_properties = [
             CountedUnknownProperty(p) for p in COUNTED_UNKNOWN_PROPERTIES
+            if not (engine == "servo" and p == "-webkit-user-drag")
         ]
 
         self.style_structs = [
