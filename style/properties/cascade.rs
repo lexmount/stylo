@@ -9,19 +9,19 @@ use crate::color::AbsoluteColor;
 use crate::computed_value_flags::ComputedValueFlags;
 use crate::context::TreeCountingCaches;
 use crate::custom_properties::{
-    get_attr_value_for_cycle_resolution, handle_invalid_at_computed_value_time,
-    remove_and_insert_initial_value, substitute_references_if_needed_and_apply,
     ComputedCustomProperties, ComputedSubstitutionFunctions, Name, NonCustomReferenceMap,
     ReferenceFlags, References, SingleNonCustomReference, SubstitutionFunctionKind, VariableValue,
+    get_attr_value_for_cycle_resolution, handle_invalid_at_computed_value_time,
+    remove_and_insert_initial_value, substitute_references_if_needed_and_apply,
 };
 use crate::dom::{AttributeTracker, DummyElementContext, ElementContext, TElement};
 #[cfg(feature = "gecko")]
 use crate::font_metrics::FontMetricsOrientation;
 use crate::properties::{
-    property_counts, CSSWideKeyword, ComputedValues, DeclarationImportanceIterator, LonghandId,
+    CASCADE_PROPERTY, CSSWideKeyword, ComputedValues, DeclarationImportanceIterator, LonghandId,
     LonghandIdSet, PrioritaryPropertyId, PrioritaryPropertyIdSet, PropertyDeclaration,
     PropertyDeclarationId, PropertyFlags, ShorthandsWithPropertyReferencesCache, StyleBuilder,
-    CASCADE_PROPERTY,
+    property_counts,
 };
 use crate::properties::{CustomDeclaration, CustomDeclarationValue, UnparsedValue};
 use crate::properties_and_values::rule::Descriptors as PropertyDescriptors;
@@ -32,9 +32,9 @@ use crate::selector_map::{PrecomputedHashMap, PrecomputedHashSet};
 use crate::selector_parser::PseudoElement;
 use crate::shared_lock::StylesheetGuards;
 use crate::style_adjuster::StyleAdjuster;
+use crate::stylesheets::UrlExtraData;
 use crate::stylesheets::container_rule::ContainerSizeQuery;
 use crate::stylesheets::layer_rule::LayerOrder;
-use crate::stylesheets::UrlExtraData;
 use crate::stylist::Stylist;
 use crate::values::computed::ToComputedValue;
 #[cfg(feature = "gecko")]
@@ -2037,23 +2037,32 @@ impl<'a> Cascade<'a> {
         }
         self.may_have_custom_property_cycles = true;
 
-        for next in &refs.refs {
-            let Some(name) = next.name.as_static_name() else {
-                debug_assert_ne!(next.substitution_kind, SubstitutionFunctionKind::Attr);
-                continue;
-            };
-            if !next.is_attr_with_type() || !self.seen.custom.attr.insert(name) {
-                // Only type() can have nested references, so we don't need to eagerly look at
-                // others.
-                continue;
-            }
-            if let Ok(v) = get_attr_value_for_cycle_resolution(
-                name,
-                &next.attribute_data,
-                &value.url_data,
-                attribute_tracker,
-            ) {
-                context.builder.substitution_functions.insert_attr(name, v);
+        // Preparing an attribute value does not create a dependency edge.
+        // Cycle traversal below still follows only fallbacks that are used.
+        let mut refs_stack = SmallVec::<[&References; 5]>::new();
+        refs_stack.push(refs);
+        while let Some(refs) = refs_stack.pop() {
+            for next in &refs.refs {
+                if let Some(ref fallback) = next.fallback {
+                    refs_stack.push(&fallback.references);
+                }
+                let Some(name) = next.name.as_static_name() else {
+                    debug_assert_ne!(next.substitution_kind, SubstitutionFunctionKind::Attr);
+                    continue;
+                };
+                if !next.is_attr_with_type() || !self.seen.custom.attr.insert(name) {
+                    // Only type() can have nested references, so we don't need to eagerly look at
+                    // others.
+                    continue;
+                }
+                if let Ok(v) = get_attr_value_for_cycle_resolution(
+                    name,
+                    &next.attribute_data,
+                    &value.url_data,
+                    attribute_tracker,
+                ) {
+                    context.builder.substitution_functions.insert_attr(name, v);
+                }
             }
         }
     }
@@ -2371,6 +2380,12 @@ fn substitute_all(
                     } else {
                         // Resolved and computed value, no other custom references left.
                         primary_valid = true;
+                    }
+                    if primary_valid && next.is_attr_with_type() {
+                        // Existing attribute tokens can still fail their declared type.
+                        // Such a failure activates the fallback and its cycle edges.
+                        primary_valid = next
+                            .attr_value_matches_type(&resolved.to_variable_value().css, url_data);
                     }
                 }
 

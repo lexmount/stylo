@@ -912,6 +912,14 @@ impl SubstitutionFunctionReference {
         self.substitution_kind == SubstitutionFunctionKind::Attr
             && matches!(self.attribute_data.kind, AttributeType::Type(..))
     }
+
+    /// Whether resolved attribute tokens satisfy this reference's type() syntax.
+    pub fn attr_value_matches_type(&self, attr: &str, url_data: &UrlExtraData) -> bool {
+        match &self.attribute_data.kind {
+            AttributeType::Type(syntax) => parse_typed_attr_value(attr, syntax, url_data).is_some(),
+            _ => true,
+        }
+    }
 }
 
 /// A struct holding information about the external references to that a custom property value may
@@ -1535,6 +1543,23 @@ pub fn get_attr_value_for_cycle_resolution(
     Ok(ComputedRegisteredValue::universal(Arc::new(value)))
 }
 
+/// Parse typed attribute values consistently during dependency traversal and substitution.
+fn parse_typed_attr_value(
+    attr: &str,
+    syntax: &SyntaxDescriptor,
+    url_data: &UrlExtraData,
+) -> Option<SpecifiedRegisteredValue> {
+    SpecifiedRegisteredValue::parse(
+        &mut Parser::new(attr),
+        syntax,
+        url_data,
+        None,
+        AllowComputationallyDependent::Yes,
+        AttrTaint::default(),
+    )
+    .ok()
+}
+
 /// See https://drafts.csswg.org/css-variables-2/#invalid-at-computed-value-time
 pub fn handle_invalid_at_computed_value_time(
     name: &Name,
@@ -2028,11 +2053,11 @@ fn substitute_one_reference<'a>(
                         } else {
                             attr
                         };
-                        let mut parser = Parser::new(&attr);
                         match &reference.attribute_data.kind {
                             AttributeType::Unit(unit) => {
                                 let css = {
                                     // Verify that attribute data is a <number-token>.
+                                    let mut parser = Parser::new(&attr);
                                     parser.expect_number().ok()?;
                                     let mut s = attr.clone();
                                     s.push_str(unit.as_ref());
@@ -2050,15 +2075,7 @@ fn substitute_one_reference<'a>(
                                 ))
                             },
                             AttributeType::Type(syntax) => {
-                                let value = SpecifiedRegisteredValue::parse(
-                                    &mut parser,
-                                    syntax,
-                                    url_data,
-                                    None,
-                                    AllowComputationallyDependent::Yes,
-                                    AttrTaint::default(),
-                                )
-                                .ok()?;
+                                let value = parse_typed_attr_value(&attr, syntax, url_data)?;
                                 let value = value.to_variable_value();
                                 Some(Substitution::from_value(
                                     value, /* attr_tainted */ true,
