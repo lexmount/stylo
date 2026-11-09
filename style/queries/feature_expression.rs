@@ -21,11 +21,11 @@ use crate::selector_map::PrecomputedHashSet;
 use crate::str::{starts_with_ignore_ascii_case, string_as_ascii_lowercase};
 use crate::stylesheets::container_rule::AttrReferenceSet;
 use crate::stylesheets::{CssRuleType, Origin, UrlExtraData};
+use crate::values::DashedIdent;
 use crate::values::computed::{self, CSSPixelLength, ToComputedValue};
 use crate::values::specified::{
     Angle, Integer, Length, Number, Percentage, Ratio, Resolution, Time,
 };
-use crate::values::DashedIdent;
 use crate::{Atom, Zero};
 use cssparser::{Parser, Token};
 use selectors::kleene_value::KleeneValue;
@@ -416,7 +416,7 @@ impl QueryFeatureExpression {
             None => {
                 return Err(ParseError::custom(
                     StyleParseErrorKind::MediaQueryExpectedFeatureName,
-                ))
+                ));
             },
         };
 
@@ -819,9 +819,11 @@ impl QueryExpressionValue {
         Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError))
     }
 
-    fn collect_attribute_references(&self, references: &mut AttrReferenceSet) {
+    fn collect_attribute_references(&self, references: &mut AttrReferenceSet) -> bool {
         if let Self::Function(f) = self {
             f.collect_attribute_references(references)
+        } else {
+            false
         }
     }
 }
@@ -1144,15 +1146,15 @@ impl QueryStyleRange {
 
     /// Get all the attributes referenced inside of an attr() function within
     /// all our QueryExpressionValues.
-    pub fn collect_attribute_references(&self, references: &mut AttrReferenceSet) {
+    pub fn collect_attribute_references(&self, references: &mut AttrReferenceSet) -> bool {
         match self {
             QueryStyleRange::StyleRange2 {
                 value1,
                 op1: _,
                 value2,
             } => {
-                value1.collect_attribute_references(references);
-                value2.collect_attribute_references(references);
+                value1.collect_attribute_references(references)
+                    | value2.collect_attribute_references(references)
             },
             QueryStyleRange::StyleRange3 {
                 value1,
@@ -1161,9 +1163,9 @@ impl QueryStyleRange {
                 op2: _,
                 value3,
             } => {
-                value1.collect_attribute_references(references);
-                value2.collect_attribute_references(references);
-                value3.collect_attribute_references(references);
+                value1.collect_attribute_references(references)
+                    | value2.collect_attribute_references(references)
+                    | value3.collect_attribute_references(references)
             },
         }
     }

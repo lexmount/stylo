@@ -1252,25 +1252,35 @@ impl VariableValue {
         self.references.has_references()
     }
 
-    /// Returns the attribute references in this variable value, if any.
-    pub fn collect_attribute_references(&self, references: &mut AttrReferenceSet) {
-        self.references.refs.iter().for_each(|r| {
-            if r.substitution_kind == SubstitutionFunctionKind::Attr {
-                // For a non-ascii-lowercase attribute, whether we match
-                // case-sensitively depends on whether the element we're
-                // matching against is an HTML element in an HTML document.
-                // So to simplify invalidation we collect both potential
-                // references here.
-                let Some(name) = r.name.as_static_name() else {
-                    return;
+    /// Collect attribute names, returning whether substitution can produce a dynamic name.
+    pub fn collect_attribute_references(&self, references: &mut AttrReferenceSet) -> bool {
+        let mut dynamic = false;
+        let mut stack = SmallVec::<[&References; 5]>::new();
+        stack.push(&self.references);
+        while let Some(refs) = stack.pop() {
+            for reference in &refs.refs {
+                if let Some(fallback) = &reference.fallback {
+                    stack.push(&fallback.references);
+                }
+                if let Some(arguments) = reference.attr_arguments() {
+                    dynamic |= arguments.has_references();
+                    stack.push(&arguments.references);
+                }
+                if reference.substitution_kind != SubstitutionFunctionKind::Attr {
+                    continue;
+                }
+                let Some(name) = reference.name.as_static_name() else {
+                    continue;
                 };
+                // Attribute matching can be ASCII-insensitive in HTML.
                 references.insert(name.clone().into());
                 let lowercase = name.to_ascii_lowercase();
                 if *name != lowercase {
                     references.insert(lowercase.into());
                 }
             }
-        })
+        }
+        dynamic
     }
 }
 

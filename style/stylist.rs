@@ -3579,6 +3579,9 @@ pub struct CascadeData {
     /// The enum value tells us whether or not the container query condition is named.
     attr_function_dependencies: PrecomputedHashMap<LocalName, ContainerAttributeDependencyKind>,
 
+    /// Container queries whose attribute names are resolved at computed-value time.
+    dynamic_attr_function_dependency: ContainerAttributeDependencyKind,
+
     /// The list of scope conditions, indexed by their id.
     scope_conditions: SmallVec<[ScopeConditionReference; 1]>,
 
@@ -3660,6 +3663,7 @@ impl CascadeData {
             layers: smallvec::smallvec![CascadeLayer::root()],
             container_conditions: smallvec::smallvec![ContainerConditionReference::none()],
             attr_function_dependencies: PrecomputedHashMap::default(),
+            dynamic_attr_function_dependency: ContainerAttributeDependencyKind::None,
             scope_conditions: smallvec::smallvec![ScopeConditionReference::none()],
             scope_subject_map: Default::default(),
             extra_data: ExtraStyleData::default(),
@@ -3814,11 +3818,11 @@ impl CascadeData {
         self.nth_of_state_dependencies.intersects(state)
     }
 
-    /// Returns whether the given attribute might appear in an attribute
-    /// selector of some rule.
+    /// Returns whether the attribute can affect a selector or an attr() container query.
     #[inline]
     pub fn might_have_attribute_dependency(&self, local_name: &LocalName) -> bool {
         self.attribute_dependencies.contains(local_name)
+            || self.dynamic_attr_function_dependency != ContainerAttributeDependencyKind::None
     }
 
     /// Whether matching an element that isn't itself a link can depend on
@@ -3838,10 +3842,13 @@ impl CascadeData {
         &self,
         local_name: &LocalName,
     ) -> ContainerAttributeDependencyKind {
-        self.attr_function_dependencies
-            .get(local_name)
-            .copied()
-            .unwrap_or(ContainerAttributeDependencyKind::None)
+        std::cmp::max(
+            self.attr_function_dependencies
+                .get(local_name)
+                .copied()
+                .unwrap_or(ContainerAttributeDependencyKind::None),
+            self.dynamic_attr_function_dependency,
+        )
     }
 
     /// Returns whether the given ID might appear in an ID selector in the
@@ -4624,6 +4631,7 @@ impl CascadeData {
                             condition.insert_attribute_references_in_dependency_map(
                                 &mut self.attr_function_dependencies,
                                 &mut self.attribute_dependencies,
+                                &mut self.dynamic_attr_function_dependency,
                             );
                         }
                     }
@@ -5071,6 +5079,7 @@ impl CascadeData {
             MoliChildListStructuralBoundaryDependencySummary::default();
         self.attribute_dependencies.clear();
         self.attr_function_dependencies.clear();
+        self.dynamic_attr_function_dependency = ContainerAttributeDependencyKind::None;
         self.nth_of_attribute_dependencies.clear();
         self.nth_of_custom_state_dependencies.clear();
         self.nth_of_class_dependencies.clear();
