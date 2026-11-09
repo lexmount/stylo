@@ -860,9 +860,7 @@ impl AttributeData {
         };
         match self.kind {
             AttributeType::None | AttributeType::RawString => true,
-            AttributeType::Unit(_) => Parser::new(&attr)
-                .parse_entirely(|input| -> Result<_, ParseError> { Ok(input.expect_number()?) })
-                .is_ok(),
+            AttributeType::Unit(_) => parse_attr_number_token(&attr).is_some(),
             AttributeType::Invalid | AttributeType::Type(_) => false,
         }
     }
@@ -2082,6 +2080,20 @@ fn quoted_css_string(src: &str) -> String {
     dest
 }
 
+/// Parse exactly one number token, excluding surrounding whitespace and comments.
+/// Keep its representation to preserve integer flags, signed zero and exponents
+/// without introducing another floating-point conversion during substitution.
+fn parse_attr_number_token(attr: &str) -> Option<&str> {
+    Parser::new(attr)
+        .parse_entirely(|input| -> Result<_, ParseError> {
+            input.skip_whitespace();
+            let start = input.position();
+            input.expect_number()?;
+            Ok(input.slice_from(start))
+        })
+        .ok()
+}
+
 fn substitute_one_reference<'a>(
     css: &'a str,
     url_data: &UrlExtraData,
@@ -2212,14 +2224,7 @@ fn substitute_one_reference<'a>(
                             match &attribute_data.kind {
                                 AttributeType::Unit(unit) => {
                                     let css = {
-                                        // Verify that attribute data is a <number-token>.
-                                        let mut parser = Parser::new(&attr);
-                                        parser
-                                            .parse_entirely(|input| -> Result<_, ParseError> {
-                                                Ok(input.expect_number()?)
-                                            })
-                                            .ok()?;
-                                        let mut s = attr.clone();
+                                        let mut s = parse_attr_number_token(&attr)?.to_owned();
                                         s.push_str(unit.as_ref());
                                         s
                                     };
