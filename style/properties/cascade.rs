@@ -713,6 +713,8 @@ struct SeenSubstitutionFunctions<'a> {
     /// performing lookups for cycle detection.
     var: PrecomputedHashMap<&'a Name, bool>,
     attr: PrecomputedHashSet<&'a Name>,
+    /// Declaration roots whose attribute names depend on substitution.
+    attr_values: Vec<&'a VariableValue>,
 }
 
 #[derive(Default)]
@@ -1895,9 +1897,6 @@ impl<'a> Cascade<'a> {
         // values, which we need to track to support chained references and detect cycles.
         if refs.flags.intersects(ReferenceFlags::ATTR) {
             self.update_attributes_map(context, value, attribute_tracker);
-            if !refs.flags.intersects(ReferenceFlags::VAR) {
-                return;
-            }
         }
 
         // The non-custom node(s) this property feeds. We don't try to figure out here which
@@ -2041,13 +2040,18 @@ impl<'a> Cascade<'a> {
         // Cycle traversal below still follows only fallbacks that are used.
         let mut refs_stack = SmallVec::<[&References; 5]>::new();
         refs_stack.push(refs);
+        let mut has_dynamic_attr = false;
         while let Some(refs) = refs_stack.pop() {
             for next in &refs.refs {
                 if let Some(ref fallback) = next.fallback {
                     refs_stack.push(&fallback.references);
                 }
+                if let Some(arguments) = next.attr_arguments() {
+                    has_dynamic_attr = true;
+                    refs_stack.push(&arguments.references);
+                    continue;
+                }
                 let Some(name) = next.name.as_static_name() else {
-                    debug_assert_ne!(next.substitution_kind, SubstitutionFunctionKind::Attr);
                     continue;
                 };
                 if !next.is_attr_with_type() || !self.seen.custom.attr.insert(name) {
@@ -2064,6 +2068,9 @@ impl<'a> Cascade<'a> {
                     context.builder.substitution_functions.insert_attr(name, v);
                 }
             }
+        }
+        if has_dynamic_attr {
+            self.seen.custom.attr_values.push(value);
         }
     }
 
@@ -2133,6 +2140,7 @@ fn substitute_all(
         Attr(Name),
         Custom(Name),
         NonCustom(SingleNonCustomReference),
+        Value(usize),
     }
 
     /// Struct recording necessary information for each variable.
@@ -2192,6 +2200,8 @@ fn substitute_all(
         decls: &'a Declarations<'d>,
         /// Shorthand cache, needed to apply prioritary properties.
         cache: &'a mut ShorthandsWithPropertyReferencesCache,
+        /// Values with dynamic attribute names, including non-custom declarations.
+        attr_values: &'a [&'a VariableValue],
     }
 
     impl<'a, 'b: 'a, 'c, 'd> Context<'a, 'b, 'c, 'd> {
@@ -2234,6 +2244,7 @@ fn substitute_all(
                         .invalid_non_custom_properties
                         .insert(non_custom.to_prioritary_id().to_longhand());
                 },
+                VarType::Value(_) => {},
             }
         }
 
@@ -2285,6 +2296,25 @@ fn substitute_all(
         while let Some(refs) = refs_stack.pop() {
             *non_custom_references |= refs.flags;
             for next in &refs.refs {
+                if let Some(arguments) = next.attr_arguments() {
+                    // The first argument is evaluated before looking up the attribute.
+                    // Its dependencies belong to the current node, so they can cycle
+                    // back through the attribute value or a registered property.
+                    if visit_value_references(
+                        var,
+                        &arguments.references,
+                        &arguments.url_data,
+                        index,
+                        references_from_non_custom_properties,
+                        context,
+                        lowlink,
+                        self_ref,
+                        attribute_tracker,
+                        non_custom_references,
+                    ) {
+                        return true;
+                    }
+                }
                 if next.substitution_kind == SubstitutionFunctionKind::Env {
                     // env() doesn't reference custom properties, so it never participates in
                     // cycles; its fallback is used only when the environment doesn't provide
@@ -2306,11 +2336,24 @@ fn substitute_all(
                     continue;
                 }
 
+                let resolved_attr = if next.substitution_kind == SubstitutionFunctionKind::Attr {
+                    next.resolve_attr(
+                        context.map(),
+                        context.stylist,
+                        context.computed_context,
+                        attribute_tracker,
+                        &mut SmallVec::new(),
+                    )
+                } else {
+                    None
+                };
                 let resolved_name = match next.substitution_kind {
                     SubstitutionFunctionKind::Var => {
                         next.name.to_resolved_var_name(context.computed_context)
                     },
-                    SubstitutionFunctionKind::Attr => next.name.as_static_name().cloned(),
+                    SubstitutionFunctionKind::Attr => {
+                        resolved_attr.as_ref().map(|(name, _)| name.clone())
+                    },
                     SubstitutionFunctionKind::Env => unreachable!("Handled above"),
                 };
                 let Some(resolved_name) = resolved_name else {
@@ -2323,14 +2366,21 @@ fn substitute_all(
                 let next_var = if next.substitution_kind == SubstitutionFunctionKind::Attr {
                     // An type()-less attr() within attr(... type()) can still have nested
                     // references.
-                    let can_chain = next.is_attr_with_type() || matches!(var, VarType::Attr(..));
+                    let attribute_data = &resolved_attr.as_ref().unwrap().1;
+                    let can_chain = attribute_data.is_typed() || matches!(var, VarType::Attr(..));
                     if !can_chain {
+                        if !attribute_data.untyped_value_is_valid(&resolved_name, attribute_tracker)
+                        {
+                            if let Some(ref fallback) = next.fallback {
+                                refs_stack.push(&fallback.references);
+                            }
+                        }
                         continue;
                     }
                     if context.map().get_attr(&resolved_name).is_none() {
                         if let Ok(val) = get_attr_value_for_cycle_resolution(
                             &resolved_name,
-                            &next.attribute_data,
+                            attribute_data,
                             url_data,
                             attribute_tracker,
                         ) {
@@ -2381,11 +2431,11 @@ fn substitute_all(
                         // Resolved and computed value, no other custom references left.
                         primary_valid = true;
                     }
-                    if primary_valid && next.is_attr_with_type() {
+                    if primary_valid && let Some((_, data)) = &resolved_attr {
                         // Existing attribute tokens can still fail their declared type.
                         // Such a failure activates the fallback and its cycle edges.
-                        primary_valid = next
-                            .attr_value_matches_type(&resolved.to_variable_value().css, url_data);
+                        primary_valid =
+                            data.value_matches_type(&resolved.to_variable_value().css, url_data);
                     }
                 }
 
@@ -2540,6 +2590,7 @@ fn substitute_all(
                 *entry = Some(context.count);
                 None
             },
+            VarType::Value(index) => Some(Arc::new(context.attr_values[index].clone())),
         };
 
         // Add new entry to the information table.
@@ -2556,7 +2607,10 @@ fn substitute_all(
         let mut lowlink = index;
         if let Some(v) = value.as_ref() {
             debug_assert!(
-                matches!(var, VarType::Custom(_) | VarType::Attr(_)),
+                matches!(
+                    var,
+                    VarType::Custom(_) | VarType::Attr(_) | VarType::Value(_)
+                ),
                 "Non-custom property has references?"
             );
 
@@ -2704,6 +2758,7 @@ fn substitute_all(
             VarType::NonCustom(non_custom) => {
                 context.apply_prioritary_property(non_custom.to_prioritary_id(), attribute_tracker);
             },
+            VarType::Value(_) => {},
         }
         // All resolved, so return the signal value.
         None
@@ -2720,6 +2775,7 @@ fn substitute_all(
         cascade: &mut *cascade,
         decls,
         cache: &mut *shorthand_cache,
+        attr_values: &seen.attr_values,
     };
     let mut first = true;
     let mut run_one = |var: VarType| {
@@ -2747,5 +2803,8 @@ fn substitute_all(
     // properties.
     for attr in &seen.attr {
         run_one(VarType::Attr((*attr).clone()));
+    }
+    for index in 0..seen.attr_values.len() {
+        run_one(VarType::Value(index));
     }
 }
