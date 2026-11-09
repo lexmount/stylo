@@ -13,7 +13,7 @@ use crate::parser::ParserContext;
 use crate::properties::{CSSWideKeyword, PrioritaryPropertyId};
 use crate::properties_and_values::{
     rule::Descriptors as PropertyDescriptors,
-    syntax::Descriptor as SyntaxDescriptor,
+    syntax::{ComponentName, Descriptor as SyntaxDescriptor, data_type::DataType},
     value::{
         AllowComputationallyDependent, ComputedValue as ComputedRegisteredValue,
         SpecifiedIdentFunction, SpecifiedValue as SpecifiedRegisteredValue,
@@ -1486,9 +1486,18 @@ fn parse_attr_type(input: &mut Parser) -> AttributeType {
     input
         .try_parse(|input| {
             Ok(match input.next()? {
-                Token::Function(name) if name.eq_ignore_ascii_case("type") => AttributeType::Type(
-                    input.parse_nested_block(SyntaxDescriptor::from_css_parser)?,
-                ),
+                Token::Function(name) if name.eq_ignore_ascii_case("type") => {
+                    let syntax = input.parse_nested_block(SyntaxDescriptor::from_css_parser)?;
+                    // <url> is not an allowed syntax component for attr(), even
+                    // in a list or an alternative that matches another type.
+                    if syntax.components.iter().any(|component| {
+                        matches!(component.name(), ComponentName::DataType(DataType::Url))
+                    }) {
+                        AttributeType::Invalid
+                    } else {
+                        AttributeType::Type(syntax)
+                    }
+                },
                 Token::Ident(ident) => {
                     if ident.eq_ignore_ascii_case("raw-string") {
                         AttributeType::RawString
