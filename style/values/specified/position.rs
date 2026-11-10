@@ -414,11 +414,9 @@ impl AnchorName {
     ToCss,
     ToResolvedValue,
     ToShmem,
-    ToTyped,
 )]
 #[repr(transparent)]
 #[css(comma)]
-#[typed(todo_derive_fields)]
 #[value_info(other_values = "all")]
 pub struct ScopedNameList(
     /// `none | all | <dashed-ident>#`
@@ -446,6 +444,23 @@ impl ScopedNameList {
             )))
         });
         ALL.clone()
+    }
+}
+
+impl crate::typed_om::ToTyped for ScopedNameList {
+    fn to_typed(&self, dest: &mut ThinVec<crate::typed_om::TypedValue>) -> Result<(), ()> {
+        let keyword = match self.0.len() {
+            0 => "none".into(),
+            // Keyword values store the decoded identifier. Their serializer
+            // escapes it, so CSS serialization here would escape it twice.
+            1 => self.0[0].0.to_string().into(),
+            // Multiple names are one opaque value, not separate iterations.
+            _ => return Err(()),
+        };
+        dest.push(crate::typed_om::TypedValue::Keyword(
+            crate::typed_om::KeywordValue(keyword),
+        ));
+        Ok(())
     }
 }
 
