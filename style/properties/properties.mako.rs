@@ -1897,7 +1897,7 @@ impl ComputedValues {
                     % endfor
                     _ => unsafe { debug_unreachable!() },
                 };
-                value.to_typed_value_list()
+                value.to_computed_typed_value_list()
             }
             % endfor
         }
