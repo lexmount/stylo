@@ -26,16 +26,11 @@ impl Parse for TimingFunction {
             return Ok(GenericTimingFunction::Keyword(keyword));
         }
         if let Ok(ident) = input.try_parse(|i| i.expect_ident_cloned()) {
-            let position = match_ignore_ascii_case! { &ident,
-                "step-start" => StepPosition::Start,
-                "step-end" => StepPosition::End,
-                _ => {
-                    return Err(ParseError::custom(
-                        SelectorParseErrorKind::UnexpectedIdent
-                    ));
-                },
+            return match_ignore_ascii_case! { &ident,
+                "step-start" => Ok(GenericTimingFunction::StepStart),
+                "step-end" => Ok(GenericTimingFunction::StepEnd),
+                _ => Err(ParseError::custom(SelectorParseErrorKind::UnexpectedIdent)),
             };
-            return Ok(GenericTimingFunction::Steps(Integer::new(1), position));
         }
         let function = input.expect_function()?.clone();
         input.parse_nested_block(move |i| {
@@ -174,6 +169,10 @@ impl TimingFunction {
     /// Generate the ComputedTimingFunction without Context.
     pub fn to_computed_value_without_context(&self) -> Option<ComputedTimingFunction> {
         Some(match &self {
+            GenericTimingFunction::StepStart => {
+                GenericTimingFunction::Steps(1, StepPosition::Start)
+            },
+            GenericTimingFunction::StepEnd => GenericTimingFunction::Steps(1, StepPosition::End),
             GenericTimingFunction::Steps(steps, pos) => {
                 let mut steps = steps.resolve()?;
                 if *pos == StepPosition::JumpNone {
@@ -201,6 +200,10 @@ impl ToComputedValue for TimingFunction {
     type ComputedValue = ComputedTimingFunction;
     fn to_computed_value(&self, context: &Context) -> Self::ComputedValue {
         match self {
+            GenericTimingFunction::StepStart => {
+                GenericTimingFunction::Steps(1, StepPosition::Start)
+            },
+            GenericTimingFunction::StepEnd => GenericTimingFunction::Steps(1, StepPosition::End),
             GenericTimingFunction::Steps(steps, pos) => {
                 let mut steps = steps.to_computed_value(context);
                 if *pos == StepPosition::JumpNone {
@@ -225,6 +228,8 @@ impl ToComputedValue for TimingFunction {
 
     fn from_computed_value(computed: &Self::ComputedValue) -> Self {
         match &computed {
+            ComputedTimingFunction::StepStart => Self::StepStart,
+            ComputedTimingFunction::StepEnd => Self::StepEnd,
             ComputedTimingFunction::Steps(steps, pos) => Self::Steps(Integer::new(*steps), *pos),
             ComputedTimingFunction::CubicBezier { x1, y1, x2, y2 } => Self::CubicBezier {
                 x1: Number::new(*x1),

@@ -6,6 +6,8 @@
 //! https://drafts.csswg.org/css-easing/#timing-functions
 
 use crate::derives::*;
+use std::fmt::{self, Write};
+use style_traits::{CssWriter, ToCss};
 
 /// A generic easing function.
 #[derive(
@@ -14,7 +16,6 @@ use crate::derives::*;
     MallocSizeOf,
     PartialEq,
     SpecifiedValueInfo,
-    ToCss,
     ToShmem,
     ToTyped,
     Serialize,
@@ -35,11 +36,10 @@ pub enum TimingFunction<Integer, Number, LinearStops> {
         x2: Number,
         y2: Number,
     },
-    /// `step-start | step-end | steps(<integer>, [ <step-position> ]?)`
+    /// `steps(<integer>, [ <step-position> ]?)`
     /// `<step-position> = jump-start | jump-end | jump-none | jump-both | start | end`
     #[css(comma, function)]
     #[typed(skip)]
-    #[value_info(other_values = "step-start,step-end")]
     Steps(Integer, #[css(skip_if = "is_end")] StepPosition),
     /// linear([<linear-stop>]#)
     /// <linear-stop> = <output> && <linear-stop-length>?
@@ -47,6 +47,50 @@ pub enum TimingFunction<Integer, Number, LinearStops> {
     #[css(function = "linear")]
     #[typed(skip)]
     LinearFunction(LinearStops),
+    /// The specified `step-start` keyword, before computed-value expansion.
+    StepStart,
+    /// The specified `step-end` keyword, before computed-value expansion.
+    StepEnd,
+}
+
+impl<Integer: ToCss, Number: ToCss, LinearStops: ToCss> ToCss
+    for TimingFunction<Integer, Number, LinearStops>
+{
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: fmt::Write,
+    {
+        match self {
+            Self::Keyword(keyword) => keyword.to_css(dest),
+            Self::StepStart => dest.write_str("steps(1, start)"),
+            Self::StepEnd => dest.write_str("steps(1)"),
+            Self::CubicBezier { x1, y1, x2, y2 } => {
+                dest.write_str("cubic-bezier(")?;
+                x1.to_css(dest)?;
+                dest.write_str(", ")?;
+                y1.to_css(dest)?;
+                dest.write_str(", ")?;
+                x2.to_css(dest)?;
+                dest.write_str(", ")?;
+                y2.to_css(dest)?;
+                dest.write_char(')')
+            },
+            Self::Steps(steps, position) => {
+                dest.write_str("steps(")?;
+                steps.to_css(dest)?;
+                if !is_end(position) {
+                    dest.write_str(", ")?;
+                    position.to_css(dest)?;
+                }
+                dest.write_char(')')
+            },
+            Self::LinearFunction(stops) => {
+                dest.write_str("linear(")?;
+                stops.to_css(dest)?;
+                dest.write_char(')')
+            },
+        }
+    }
 }
 
 #[allow(missing_docs)]
