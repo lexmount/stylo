@@ -1664,13 +1664,33 @@ pub enum FontSynthesisStyle {
     ToComputedValue,
     ToResolvedValue,
     ToShmem,
-    ToTyped,
 )]
 #[repr(C)]
-#[typed(todo_derive_fields)]
 /// Allows authors to choose a palette from those supported by a color font
 /// (and potentially @font-palette-values overrides).
 pub struct FontPalette(Atom);
+
+impl crate::typed_om::ToTyped for FontPalette {
+    fn to_typed(
+        &self,
+        dest: &mut thin_vec::ThinVec<crate::typed_om::TypedValue>,
+    ) -> Result<(), ()> {
+        let keyword = if self.0 == atom!("normal") {
+            "normal"
+        } else if self.0 == atom!("light") {
+            "light"
+        } else if self.0 == atom!("dark") {
+            "dark"
+        } else {
+            // Named palettes use the property-associated representation.
+            return Err(());
+        };
+        dest.push(crate::typed_om::TypedValue::Keyword(
+            crate::typed_om::KeywordValue(keyword.into()),
+        ));
+        Ok(())
+    }
+}
 
 #[allow(missing_docs)]
 impl FontPalette {
