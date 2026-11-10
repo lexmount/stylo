@@ -35,7 +35,7 @@ use crate::stylist::Stylist;
 use crate::typed_om::{ToTyped, TypedValue};
 use crate::values::{computed, serialize_atom_name};
 use arrayvec::{ArrayVec, Drain as ArrayVecDrain};
-use cssparser::{match_ignore_ascii_case, Parser};
+use cssparser::{Parser, match_ignore_ascii_case};
 use rustc_hash::FxHashMap;
 use servo_arc::Arc;
 use std::{
@@ -533,7 +533,7 @@ impl PropertyId {
                 return !context
                     .nesting_context
                     .rule_types
-                    .contains(CssRuleType::PositionTry)
+                    .contains(CssRuleType::PositionTry);
             },
             Some(id) => id,
         };
@@ -874,6 +874,9 @@ impl PropertyDeclaration {
     /// property-specific requirement even when this method returns true for all
     /// the longhand declarations.
     pub fn may_serialize_as_part_of_shorthand(&self) -> bool {
+        if self.uses_legacy_mask_composite_syntax() {
+            return false;
+        }
         match *self {
             PropertyDeclaration::CSSWideKeyword(..) | PropertyDeclaration::WithVariables(..) => {
                 false
@@ -882,6 +885,23 @@ impl PropertyDeclaration {
                 unreachable!("Serializing a custom property as part of shorthand?")
             },
             _ => true,
+        }
+    }
+
+    /// Extended prefixed operators have no representation in the standard mask grammar.
+    pub(crate) fn uses_legacy_mask_composite_syntax(&self) -> bool {
+        match self {
+            PropertyDeclaration::MaskComposite(value) => value.0.iter().any(|value| {
+                use longhands::mask_composite::single_value::SpecifiedValue as Operator;
+                !matches!(
+                    value,
+                    Operator::Add | Operator::Subtract | Operator::Intersect | Operator::Exclude
+                )
+            }),
+            PropertyDeclaration::WithVariables(value) => {
+                value.id == LonghandId::MaskComposite && value.value.legacy_mask_composite
+            },
+            _ => false,
         }
     }
 
@@ -937,6 +957,15 @@ impl PropertyDeclaration {
             },
             PropertyId::NonCustom(id) => id,
         };
+        let legacy_mask_composite =
+            cfg!(feature = "servo") && non_custom_id.name() == "-webkit-mask-composite";
+        let alias_context;
+        let context = if context.legacy_mask_composite != legacy_mask_composite {
+            alias_context = context.with_legacy_mask_composite(legacy_mask_composite);
+            &alias_context
+        } else {
+            context
+        };
         match non_custom_id.longhand_or_shorthand() {
             Ok(longhand_id) => {
                 parse_non_custom_property_declaration_value_into(
@@ -959,6 +988,7 @@ impl PropertyDeclaration {
                             value: Arc::new(UnparsedValue {
                                 variable_value,
                                 from_shorthand: None,
+                                legacy_mask_composite: context.legacy_mask_composite,
                             }),
                         }))
                     },
@@ -987,6 +1017,7 @@ impl PropertyDeclaration {
                         let unparsed = Arc::new(UnparsedValue {
                             variable_value,
                             from_shorthand: Some(shorthand_id),
+                            legacy_mask_composite: context.legacy_mask_composite,
                         });
                         if shorthand_id == ShorthandId::All {
                             declarations.all_shorthand = AllShorthand::WithVariables(unparsed)
@@ -1542,6 +1573,8 @@ pub struct UnparsedValue {
     pub(super) variable_value: custom_properties::VariableValue,
     /// The shorthand this came from.
     from_shorthand: Option<ShorthandId>,
+    /// Preserve the input grammar across deferred var()/env() substitution.
+    legacy_mask_composite: bool,
 }
 
 impl ToCss for UnparsedValue {
@@ -1625,8 +1658,8 @@ impl UnparsedValue {
             Err(..) => return invalid_at_computed_value_time(),
         };
 
-        // As of this writing, only the base URL is used for property
-        // values.
+        // Retain the base URL and the original prefixed value grammar when
+        // parsing the result of substitution.
         //
         // NOTE(emilio): we intentionally pase `None` as the rule type here.
         // If something starts depending on it, it's probably a bug, since
@@ -1635,7 +1668,7 @@ impl UnparsedValue {
         // whether you want to do this!
         //
         // FIXME(emilio): ParsingMode is slightly fishy...
-        let context = ParserContext::new(
+        let mut context = ParserContext::new(
             Origin::Author,
             &self.variable_value.url_data,
             None,
@@ -1646,6 +1679,7 @@ impl UnparsedValue {
             None,
             attr_taint,
         );
+        context.legacy_mask_composite = self.legacy_mask_composite;
 
         let mut input = Parser::new(&css);
         input.skip_whitespace();
@@ -1660,7 +1694,7 @@ impl UnparsedValue {
                 {
                     Ok(decl) => Cow::Owned(decl),
                     Err(..) => invalid_at_computed_value_time(),
-                }
+                };
             },
             Some(shorthand) => shorthand,
         };
@@ -1845,7 +1879,7 @@ impl<'a> Iterator for TransitionPropertyIterator<'a> {
                     return Some(TransitionPropertyIteration {
                         property: OwnedPropertyDeclarationId::Custom(name),
                         index,
-                    })
+                    });
                 },
                 TransitionProperty::Unsupported(..) => {},
             }
