@@ -6,11 +6,13 @@
 
 use crate::Zero;
 use crate::derives::*;
-use crate::values::animated::ToAnimatedZero;
+use crate::typed_om::{ToTyped, TypedValue};
+use crate::values::animated::{Context as AnimatedContext, ToAnimatedValue, ToAnimatedZero};
 use crate::values::generics::Optional;
 use std::fmt::{self, Write};
 use style_traits::values::SequenceWriter;
 use style_traits::{CssWriter, ToCss};
+use thin_vec::ThinVec;
 
 #[derive(
     Animate,
@@ -60,12 +62,9 @@ pub enum BaselineShiftKeyword {
     MallocSizeOf,
     PartialEq,
     SpecifiedValueInfo,
-    ToAnimatedValue,
     ToComputedValue,
-    ToCss,
     ToResolvedValue,
     ToShmem,
-    ToTyped,
 )]
 #[repr(C, u8)]
 pub enum GenericBaselineShift<LengthPercentage> {
@@ -73,15 +72,65 @@ pub enum GenericBaselineShift<LengthPercentage> {
     Keyword(BaselineShiftKeyword),
     /// Raise (positive value) or lower (negative value) by the specified length or specified percentage of the line-height.
     Length(LengthPercentage),
+    /// An implicit zero offset. Keep it distinct from a numeric zero supplied
+    /// by the author so `vertical-align` can serialize both forms.
+    #[value_info(skip)]
+    Initial,
 }
 
 pub use self::GenericBaselineShift as BaselineShift;
 
-impl<L: Zero> BaselineShift<L> {
+impl<L> BaselineShift<L> {
     /// Returns the initial `0` value.
     #[inline]
     pub fn zero() -> Self {
-        BaselineShift::Length(Zero::zero())
+        Self::Initial
+    }
+}
+
+impl<L: ToCss> ToCss for BaselineShift<L> {
+    fn to_css<W>(&self, dest: &mut CssWriter<W>) -> fmt::Result
+    where
+        W: Write,
+    {
+        match self {
+            Self::Keyword(keyword) => keyword.to_css(dest),
+            Self::Length(length) => length.to_css(dest),
+            Self::Initial => dest.write_str("0px"),
+        }
+    }
+}
+
+impl<L: ToTyped + Zero> ToTyped for BaselineShift<L> {
+    fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
+        match self {
+            Self::Keyword(keyword) => keyword.to_typed(dest),
+            Self::Length(length) => length.to_typed(dest),
+            Self::Initial => L::zero().to_typed(dest),
+        }
+    }
+}
+
+impl<L: ToAnimatedValue + Zero> ToAnimatedValue for BaselineShift<L> {
+    type AnimatedValue = BaselineShift<L::AnimatedValue>;
+
+    fn to_animated_value(self, context: &AnimatedContext) -> Self::AnimatedValue {
+        let length = match self {
+            Self::Keyword(keyword) => return BaselineShift::Keyword(keyword),
+            Self::Length(length) => length,
+            // An omitted shift interpolates from the same zero length as an
+            // explicit zero.
+            Self::Initial => L::zero(),
+        };
+        BaselineShift::Length(length.to_animated_value(context))
+    }
+
+    fn from_animated_value(value: Self::AnimatedValue) -> Self {
+        match value {
+            BaselineShift::Keyword(keyword) => Self::Keyword(keyword),
+            BaselineShift::Length(length) => Self::Length(L::from_animated_value(length)),
+            BaselineShift::Initial => Self::Initial,
+        }
     }
 }
 

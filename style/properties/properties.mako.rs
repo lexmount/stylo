@@ -1781,6 +1781,19 @@ impl ComputedValues {
         if shorthand == ShorthandId::WhiteSpace {
             return self.computed_or_resolved_white_space_shorthand_value(context, dest);
         }
+        if shorthand == ShorthandId::VerticalAlign {
+            let PropertyDeclaration::BaselineShift(baseline_shift) =
+                self.computed_or_resolved_declaration(LonghandId::BaselineShift, context)
+            else {
+                unreachable!("baseline-shift declaration");
+            };
+            let value = shorthands::vertical_align::LonghandsToSerialize {
+                baseline_source: &self.clone_baseline_source(),
+                alignment_baseline: &self.clone_alignment_baseline(),
+                baseline_shift: &baseline_shift,
+            };
+            return value.to_css(&mut CssWriter::new(dest));
+        }
 
         let mut values = Vec::new();
         for longhand in shorthand.longhands() {
@@ -1901,6 +1914,38 @@ impl ComputedValues {
             }
             % endfor
         }
+    }
+
+    /// Reify a computed shorthand whose serialization has a single component.
+    pub fn shorthand_value_to_typed_value_list(
+        &self,
+        shorthand: ShorthandId,
+    ) -> Option<TypedValueList> {
+        if shorthand != ShorthandId::VerticalAlign {
+            return None;
+        }
+        let components = [
+            (
+                self.clone_baseline_source() != computed::BaselineSource::Auto,
+                LonghandId::BaselineSource,
+            ),
+            (
+                self.clone_alignment_baseline() != computed::AlignmentBaseline::Baseline,
+                LonghandId::AlignmentBaseline,
+            ),
+            (
+                self.clone_baseline_shift() != computed::BaselineShift::zero(),
+                LonghandId::BaselineShift,
+            ),
+        ];
+        let mut components = components.into_iter().filter_map(|(present, id)| present.then_some(id));
+        // With all three longhands at their initial values, the shorthand
+        // serializes as the alignment keyword "baseline".
+        let id = components.next().unwrap_or(LonghandId::AlignmentBaseline);
+        if components.next().is_some() {
+            return None;
+        }
+        self.property_value_to_typed_value_list(id)
     }
 
     /// Returns the given longhand's resolved value as a property declaration.
