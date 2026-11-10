@@ -920,6 +920,13 @@ pub trait ToTyped {
         self.to_typed(&mut dest).ok()?;
         Some(TypedValueList { values: dest })
     }
+
+    /// Reify a computed value, resolving calculations when the specified and
+    /// computed representations share a type. Other types use their ordinary
+    /// reification. Values needing unavailable context remain unrepresentable.
+    fn to_computed_typed_value_list(&self) -> Option<TypedValueList> {
+        self.to_typed_value_list()
+    }
 }
 
 impl<T> ToTyped for &T
@@ -928,6 +935,10 @@ where
 {
     fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
         (*self).to_typed(dest)
+    }
+
+    fn to_computed_typed_value_list(&self) -> Option<TypedValueList> {
+        (*self).to_computed_typed_value_list()
     }
 }
 
@@ -938,6 +949,10 @@ where
     fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
         (**self).to_typed(dest)
     }
+
+    fn to_computed_typed_value_list(&self) -> Option<TypedValueList> {
+        (**self).to_computed_typed_value_list()
+    }
 }
 
 impl<T> ToTyped for Arc<T>
@@ -946,6 +961,10 @@ where
 {
     fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
         (**self).to_typed(dest)
+    }
+
+    fn to_computed_typed_value_list(&self) -> Option<TypedValueList> {
+        (**self).to_computed_typed_value_list()
     }
 }
 

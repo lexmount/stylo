@@ -8,6 +8,7 @@ use crate::Zero;
 use crate::derives::*;
 use crate::parser::{Parse, ParserContext};
 use crate::properties::longhands::writing_mode::computed_value::T as SpecifiedWritingMode;
+use crate::typed_om::{KeywordValue, ToTyped, TypedValue, TypedValueList};
 use crate::values::computed;
 use crate::values::computed::text::TextEmphasisStyle as ComputedTextEmphasisStyle;
 use crate::values::computed::{Context, ToComputedValue};
@@ -27,6 +28,7 @@ use style_traits::values::SequenceWriter;
 use style_traits::values::specified::AllowedNumericType;
 use style_traits::{CssWriter, ParseError, StyleParseErrorKind, ToCss};
 use style_traits::{KeywordsCollectFn, SpecifiedValueInfo};
+use thin_vec::ThinVec;
 
 /// A specified type for the `initial-letter` property.
 pub type InitialLetter = GenericInitialLetter<Number, Integer>;
@@ -126,9 +128,8 @@ pub enum HyphenateCharacter {
 }
 
 /// A value for the `text-size-adjust` property.
-#[derive(Clone, Debug, MallocSizeOf, PartialEq, SpecifiedValueInfo, ToShmem, ToTyped)]
+#[derive(Clone, Debug, MallocSizeOf, PartialEq, SpecifiedValueInfo, ToShmem)]
 #[repr(C, u8)]
-#[typed(todo_derive_fields)]
 pub enum TextSizeAdjust {
     /// `auto`
     Auto,
@@ -144,6 +145,26 @@ impl TextSizeAdjust {
     /// Returns the initial value.
     pub fn auto() -> Self {
         Self::Auto
+    }
+}
+
+impl ToTyped for TextSizeAdjust {
+    fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
+        let keyword = match self {
+            Self::Auto => "auto",
+            Self::None => "none",
+            Self::Percentage(value) => return value.to_typed(dest),
+            Self::Dynamic(_) => return Err(()),
+        };
+        dest.push(TypedValue::Keyword(KeywordValue(keyword.into())));
+        Ok(())
+    }
+
+    fn to_computed_typed_value_list(&self) -> Option<TypedValueList> {
+        match self {
+            Self::Percentage(value) => value.compute()?.to_typed_value_list(),
+            _ => self.to_typed_value_list(),
+        }
     }
 }
 
