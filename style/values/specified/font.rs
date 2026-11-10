@@ -1118,8 +1118,10 @@ bitflags! {
     ToComputedValue,
     ToResolvedValue,
     ToShmem,
+    ToTyped,
 )]
 #[repr(C, u8)]
+#[typed(skip_derive_fields)]
 /// Set of variant alternates
 pub enum VariantAlternates {
     /// Enables display of stylistic alternates
@@ -1161,7 +1163,6 @@ pub enum VariantAlternates {
     ToTyped,
 )]
 #[repr(transparent)]
-#[typed(todo_derive_fields)]
 /// List of Variant Alternates
 pub struct FontVariantAlternates(
     #[css(if_empty = "normal", iterable)] crate::OwnedSlice<VariantAlternates>,
