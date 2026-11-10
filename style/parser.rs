@@ -69,6 +69,7 @@ impl NestingContext {
 }
 
 /// The data that the parser needs from outside in order to parse a stylesheet.
+#[derive(Clone)]
 pub struct ParserContext<'a> {
     /// The `Origin` of the stylesheet, whether it's a user, author or
     /// user-agent stylesheet.
@@ -89,6 +90,8 @@ pub struct ParserContext<'a> {
     pub nesting_context: NestingContext,
     /// The relevant regions in the input that have been tainted by attr() if relevant.
     pub attr_tainted_regions: AttrTaint,
+    /// Whether this declaration uses the extended prefixed mask-composite syntax.
+    pub(crate) legacy_mask_composite: bool,
 }
 
 impl<'a> ParserContext<'a> {
@@ -115,7 +118,14 @@ impl<'a> ParserContext<'a> {
             use_counters,
             nesting_context: NestingContext::new_from_rule(rule_type),
             attr_tainted_regions,
+            legacy_mask_composite: false,
         }
+    }
+
+    pub(crate) fn with_legacy_mask_composite(&self, legacy: bool) -> Self {
+        let mut context = self.clone();
+        context.legacy_mask_composite = legacy;
+        context
     }
 
     /// Temporarily sets the rule_type and executes the callback function, returning its result.

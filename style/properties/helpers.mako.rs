@@ -241,9 +241,19 @@ pub mod ${property.ident} {
         SpecifiedValue::${to_camel_case(property.keyword.values[0])}
     }
     #[inline]
-    pub fn parse(_context: &ParserContext, input: &mut Parser)
+    pub fn parse(${'context' if engine == 'servo' and property.keyword.extra_servo_values_condition else '_context'}: &ParserContext, input: &mut Parser)
                          -> Result<SpecifiedValue, ParseError> {
+        % if engine == "servo" and property.keyword.extra_servo_values_condition:
+        let value = SpecifiedValue::parse(input)?;
+        if !(${property.keyword.extra_servo_values_condition}) && matches!(value,
+            ${" | ".join("SpecifiedValue::" + to_camel_case(v) for v in property.keyword.extra_servo_values)}
+        ) {
+            return Err(ParseError::custom(style_traits::StyleParseErrorKind::UnspecifiedError));
+        }
+        Ok(value)
+        % else:
         SpecifiedValue::parse(input)
+        % endif
     }
 
     #[cfg(feature = "gecko")]

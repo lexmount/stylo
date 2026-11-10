@@ -71,6 +71,26 @@ impl CssDeclarationBlock {
         output
     }
 
+    /// Serialize declaration input without dropping the prefixed grammar needed
+    /// by extended mask-composite operators and deferred substitution.
+    pub fn style_resolution_text(&self) -> String {
+        declaration_block_style_resolution_text(&self.block)
+    }
+
+    /// Apply the native declaration's grammar to a renderer projection while
+    /// preserving every value token and custom-property byte.
+    pub fn project_style_resolution_names(&self, text: String) -> String {
+        if self
+            .block
+            .declaration_importance_iter()
+            .any(|(declaration, _)| declaration.uses_legacy_mask_composite_syntax())
+        {
+            project_mask_composite_alias(text)
+        } else {
+            text
+        }
+    }
+
     pub fn item(&self, index: usize) -> Option<String> {
         let (declaration, _) = self.block.declaration_importance_iter().nth(index)?;
         Some(property_declaration_name(declaration.id()))
@@ -142,7 +162,7 @@ impl CssDeclarationBlock {
         else {
             return CssMutationProjection::parse_error();
         };
-        let before_css_text = self.css_text();
+        let before = self.block.clone();
         let modified_existing = self
             .block
             .first_declaration_to_remove(&parsed.property)
@@ -150,8 +170,7 @@ impl CssDeclarationBlock {
         self.remove_property_by_id(&parsed.property);
         self.block
             .extend(parsed.declarations.drain(), parsed.importance);
-        let after_css_text = self.css_text();
-        let set_result = if after_css_text == before_css_text {
+        let set_result = if self.block == before {
             CssSetResult::Unchanged
         } else if modified_existing {
             CssSetResult::ModifiedExisting
@@ -200,6 +219,47 @@ impl CssDeclarationBlock {
             old_value: Some(old_value),
         }
     }
+}
+
+pub(crate) fn declaration_block_style_resolution_text(block: &PropertyDeclarationBlock) -> String {
+    let mut output = CssString::new();
+    block.to_css(&mut output).ok();
+    if block
+        .declaration_importance_iter()
+        .any(|(declaration, _)| declaration.uses_legacy_mask_composite_syntax())
+    {
+        project_mask_composite_alias(output)
+    } else {
+        output
+    }
+}
+
+fn project_mask_composite_alias(mut text: String) -> String {
+    let mut input = Parser::new(&text);
+    let mut declaration_start = true;
+    let mut names = Vec::new();
+    loop {
+        let start = input.position().byte_index();
+        let Ok(token) = input.next_including_whitespace_and_comments().cloned() else {
+            break;
+        };
+        match token {
+            cssparser::Token::WhiteSpace(_) | cssparser::Token::Comment(_) => {},
+            cssparser::Token::Semicolon => declaration_start = true,
+            cssparser::Token::Ident(name) if declaration_start => {
+                if name == "mask-composite" {
+                    names.push(start..input.position().byte_index());
+                }
+                declaration_start = false;
+            },
+            _ => declaration_start = false,
+        }
+    }
+    drop(input);
+    for range in names.into_iter().rev() {
+        text.replace_range(range, "-webkit-mask-composite");
+    }
+    text
 }
 
 impl CssMutationProjection {
@@ -415,7 +475,11 @@ mod tests {
             "calc(1px * exp(tan(atan2(50%, 1px))))",
         ] {
             let mut block = CssDeclarationBlock::default();
-            assert_eq!(block.set_property("width", value, false), CssSetResult::ParseError, "{value}");
+            assert_eq!(
+                block.set_property("width", value, false),
+                CssSetResult::ParseError,
+                "{value}"
+            );
         }
         for value in [
             "calc(1px * pow(tan(atan2(1px, 1px)), 1))",
@@ -424,7 +488,11 @@ mod tests {
             "calc(1px * sign(50%))",
         ] {
             let mut block = CssDeclarationBlock::default();
-            assert_ne!(block.set_property("width", value, false), CssSetResult::ParseError, "{value}");
+            assert_ne!(
+                block.set_property("width", value, false),
+                CssSetResult::ParseError,
+                "{value}"
+            );
         }
     }
 

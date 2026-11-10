@@ -1773,11 +1773,9 @@ fn page_margin_longhand_name(name: &str) -> bool {
 }
 
 fn declaration_block_css_text(block: &PropertyDeclarationBlock) -> String {
-    let mut css_text = CssStringWriter::new();
-    block
-        .to_css(&mut css_text)
-        .expect("serializing a declaration block to string should not fail");
-    css_text.trim_end().to_owned()
+    crate::moli_declaration_block::declaration_block_style_resolution_text(block)
+        .trim_end()
+        .to_owned()
 }
 
 fn keyframe_rule_view(

@@ -260,6 +260,7 @@ class Keyword(object):
         gecko_enum_prefix=None,
         extra_gecko_values=None,
         extra_servo_values=None,
+        extra_servo_values_condition=None,
         gecko_aliases=None,
         servo_aliases=None,
         gecko_inexhaustive=None,
@@ -278,6 +279,7 @@ class Keyword(object):
             self.gecko_enum_prefix = "Style" + to_camel_case(name.replace("-moz-", "").replace("-webkit-", ""))
         self.extra_gecko_values = extra_gecko_values or []
         self.extra_servo_values = extra_servo_values or []
+        self.extra_servo_values_condition = extra_servo_values_condition
         self.gecko_aliases = parse_aliases(gecko_aliases or [])
         self.servo_aliases = parse_aliases(servo_aliases or [])
         self.gecko_inexhaustive = gecko_inexhaustive or self.gecko_constant_prefix is not None
