@@ -1150,12 +1150,25 @@ where
     ToComputedValue,
     ToResolvedValue,
     ToShmem,
-    ToTyped,
 )]
 #[repr(C)]
-#[typed(todo_derive_fields)]
 #[value_info(other_values = "normal")]
 pub struct FontLanguageOverride(pub u32);
+
+impl crate::typed_om::ToTyped for FontLanguageOverride {
+    fn to_typed(
+        &self,
+        dest: &mut thin_vec::ThinVec<crate::typed_om::TypedValue>,
+    ) -> Result<(), ()> {
+        if self.0 != 0 {
+            return Err(());
+        }
+        dest.push(crate::typed_om::TypedValue::Keyword(
+            crate::typed_om::KeywordValue("normal".into()),
+        ));
+        Ok(())
+    }
+}
 
 impl FontLanguageOverride {
     #[inline]

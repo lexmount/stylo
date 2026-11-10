@@ -826,7 +826,9 @@ pub struct TypedValueList {
 ///   other internal bits, such as `contain: size`.
 ///
 /// * `#[typed(skip_derive_fields)]` on the type disables recursion for
-///   structs and data-carrying enum variants.
+///   structs and data-carrying enum variants. A single iterable field may
+///   still produce its `#[css(if_empty = "...")]` keyword without requiring
+///   its elements to implement `ToTyped`.
 ///
 /// * `#[css(skip)]`, `#[typed(skip)]`, or `#[typed(todo)]` on a variant cause
 ///   that variant to be treated as unsupported (the derived implementation
