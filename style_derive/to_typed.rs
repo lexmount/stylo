@@ -58,7 +58,8 @@ use synstructure::{BindingInfo, Structure};
 ///   other internal bits, such as `contain: size`.
 ///
 /// * `#[typed(skip_derive_fields)]` on the type disables field recursion for
-///   structs and data-carrying enum variants.
+///   structs and data-carrying enum variants. A single iterable field can still
+///   reify its `#[css(if_empty = "...")]` keyword without reifying elements.
 ///
 /// * `#[css(skip)]`, `#[typed(skip)]`, or `#[typed(todo)]` on a variant mark
 ///   it as unsupported and cause the generated arm to return
@@ -367,13 +368,38 @@ fn derive_variant_arm(
 
         derive_variant_fields_expr(bindings, where_clause, allow_multiple_values)
     } else {
-        // This variant has one or more fields, but field reification is
-        // disabled. With `skip_derive_fields`, this variant simply returns
-        // `Err(())`.
-        quote! {
+        derive_empty_iterable_keyword(bindings).unwrap_or_else(|| quote! { Err(()) })
+    }
+}
+
+/// Empty containers can represent a keyword even when their elements cannot
+/// be reified. Do not require an element `ToTyped` bound or recurse into it.
+fn derive_empty_iterable_keyword(bindings: &[BindingInfo]) -> Option<TokenStream> {
+    let [field] = bindings else {
+        return None;
+    };
+    let css = cg::parse_field_attrs::<CssFieldAttrs>(&field.ast());
+    let typed = cg::parse_field_attrs::<TypedFieldAttrs>(&field.ast());
+    if !css.iterable
+        || css.skip
+        || css.skip_if.is_some()
+        || css.contextual_skip_if.is_some()
+        || typed.skip_if.is_some()
+        || typed.contextual_skip_if.is_some()
+    {
+        return None;
+    }
+    let keyword = css.if_empty?;
+    Some(quote! {
+        if #field.iter().next().is_none() {
+            dest.push(crate::typed_om::TypedValue::Keyword(
+                crate::typed_om::KeywordValue(style_traits::CssString::from(#keyword))
+            ));
+            Ok(())
+        } else {
             Err(())
         }
-    }
+    })
 }
 
 /// Generate the match arm expression for fields of a struct or enum variant
@@ -641,7 +667,8 @@ pub struct TypedInputAttrs {
     ///
     /// When set, the derive will not call `.to_typed()` on inner values (for
     /// example, struct fields or data-carrying enum variants), and instead
-    /// the generated code will return `Err(())` for those cases.
+    /// the generated code will return `Err(())` for those cases, except for
+    /// single iterable fields with a keyword for their empty value.
     ///
     /// This is useful to avoid requiring inner types to implement `ToTyped`
     /// when reification of those fields is not yet supported.
@@ -650,7 +677,8 @@ pub struct TypedInputAttrs {
     /// Temporarily disables field-level recursion while marking it as TODO.
     ///
     /// When set, the derive will not call `.to_typed()` on inner values and
-    /// instead return `Err(())` for those cases.
+    /// instead return `Err(())` for those cases, with the same empty-keyword
+    /// exception as `skip_derive_fields`.
     ///
     /// Unlike `skip_derive_fields`, this indicates that reification is
     /// expected to be revisited later, either to implement it or to switch to

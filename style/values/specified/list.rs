@@ -120,8 +120,10 @@ pub struct QuotePair {
     ToCss,
     ToResolvedValue,
     ToShmem,
+    ToTyped,
 )]
 #[repr(transparent)]
+#[typed(skip_derive_fields)]
 pub struct QuoteList(
     #[css(iterable, if_empty = "none")]
     #[ignore_malloc_size_of = "Arc"]
@@ -143,7 +145,6 @@ pub struct QuoteList(
     ToTyped,
 )]
 #[repr(C)]
-#[typed(todo_derive_fields)]
 pub enum Quotes {
     /// list of quote pairs
     QuoteList(QuoteList),
