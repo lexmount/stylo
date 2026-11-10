@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 
 use cssparser::Parser;
+use servo_arc::Arc;
 use style_traits::{CssString, ParsingMode};
 
 use crate::{
@@ -200,6 +201,26 @@ impl CssDeclarationBlock {
 
     pub fn into_inner(self) -> PropertyDeclarationBlock {
         self.block
+    }
+
+    /// Restore native pending substitutions after reparsing CSSOM text in its
+    /// owning cascade context. A partially overwritten shorthand's surviving
+    /// longhands serialize as empty values and cannot be recovered from text.
+    pub fn restore_pending_substitutions(
+        &self,
+        block: &mut PropertyDeclarationBlock,
+        url_data: &UrlExtraData,
+    ) {
+        for (declaration, importance) in self.block.declaration_importance_iter() {
+            let PropertyDeclaration::WithVariables(variable) = declaration else {
+                continue;
+            };
+            let mut variable = variable.clone();
+            variable.value = Arc::new(variable.value.with_url_data(url_data));
+            // A compatibility `all` declaration can still win by importance
+            // in the text-parsed cascade even though CSSOM stores it separately.
+            block.push(PropertyDeclaration::WithVariables(variable), importance);
+        }
     }
 
     fn property_value_by_id(&self, property: &PropertyId) -> String {
@@ -455,6 +476,67 @@ fn with_declaration_context<R>(f: impl FnOnce(&ParserContext) -> R) -> Option<R>
 #[cfg(test)]
 mod tests {
     use super::{CssDeclarationBlock, CssDeclarationEntry, CssSetResult, parse_declaration_block};
+
+    #[test]
+    fn pending_substitutions_keep_their_native_grammar_and_adopt_the_cascade_base() {
+        use crate::properties::{Importance, PropertyDeclaration};
+        use crate::stylesheets::UrlExtraData;
+
+        static_prefs::set_pref!("layout.unimplemented", true);
+
+        let mut source = parse_declaration_block(
+            "background: var(--paint) !important; -webkit-mask-composite: var(--operator);",
+        );
+        source.set_property("background-color", "blue", false);
+        let original = source.clone();
+        let mut reparsed = parse_declaration_block(&source.style_resolution_text()).into_inner();
+        let base =
+            UrlExtraData::from(url::Url::parse("https://example.org/styles/main.css").unwrap());
+        source.restore_pending_substitutions(&mut reparsed, &base);
+        let restored = CssDeclarationBlock::new(reparsed);
+        assert_eq!(
+            restored.property_value("background-color").as_deref(),
+            Some("blue")
+        );
+        assert!(!restored.property_priority("background-color"));
+        assert!(restored.property_priority("background-image"));
+        assert_eq!(
+            restored.property_value("background-image").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            source, original,
+            "cascade projection must not mutate CSSOM ownership"
+        );
+        let mut pending_count = 0;
+        for (declaration, importance) in restored.block.declaration_importance_iter() {
+            let PropertyDeclaration::WithVariables(value) = declaration else {
+                continue;
+            };
+            pending_count += 1;
+            assert_eq!(value.value.variable_value.url_data, base);
+            let source_declaration = source.block.get(declaration.id()).unwrap();
+            assert_eq!(importance, source_declaration.1);
+            if declaration.id().name() != "mask-composite" {
+                assert_eq!(importance, Importance::Important);
+            }
+        }
+        assert_eq!(pending_count, 9);
+        let ordinary = parse_declaration_block("background: var(--paint)");
+        let mut important = parse_declaration_block("all: initial !important").into_inner();
+        ordinary.restore_pending_substitutions(&mut important, &base);
+        let important = CssDeclarationBlock::new(important);
+        assert_eq!(
+            important.property_value("background-image").as_deref(),
+            Some("initial")
+        );
+        assert!(important.property_priority("background-image"));
+        assert!(
+            restored
+                .style_resolution_text()
+                .contains("-webkit-mask-composite: var(--operator)")
+        );
+    }
 
     fn set_projection_entries(
         block: &mut CssDeclarationBlock,
@@ -844,6 +926,7 @@ mod tests {
 
     #[test]
     fn declaration_block_set_property_updates_through_pdb() {
+        static_prefs::set_pref!("layout.unimplemented", true);
         let mut block = parse_declaration_block("color: red !important; padding: 1px 2px;");
 
         let entries = set_projection_entries(&mut block, "color", "blue", false);

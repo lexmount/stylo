@@ -1610,6 +1610,17 @@ pub type ShorthandsWithPropertyReferencesCache =
     FxHashMap<(ShorthandId, LonghandId), PropertyDeclaration>;
 
 impl UnparsedValue {
+    /// Retain deferred shorthand/alias parsing while adopting the cascade's URL context.
+    pub(crate) fn with_url_data(&self, url_data: &crate::stylesheets::UrlExtraData) -> Self {
+        let mut variable_value = self.variable_value.clone();
+        variable_value.url_data = url_data.clone();
+        Self {
+            variable_value,
+            from_shorthand: self.from_shorthand,
+            legacy_mask_composite: self.legacy_mask_composite,
+        }
+    }
+
     fn substitute_variables<'cache>(
         &self,
         longhand_id: LonghandId,
