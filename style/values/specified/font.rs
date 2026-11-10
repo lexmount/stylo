@@ -367,15 +367,37 @@ impl SpecifiedFontStyle {
 }
 
 /// The specified value of the `font-style` property.
-#[derive(
-    Clone, Debug, MallocSizeOf, Parse, PartialEq, SpecifiedValueInfo, ToCss, ToShmem, ToTyped,
-)]
+#[derive(Clone, Debug, MallocSizeOf, Parse, PartialEq, SpecifiedValueInfo, ToCss, ToShmem)]
 #[allow(missing_docs)]
-#[typed(todo_derive_fields)]
 pub enum FontStyle {
     Specified(SpecifiedFontStyle),
     #[css(skip)]
     System(SystemFont),
+}
+
+impl crate::typed_om::ToTyped for FontStyle {
+    fn to_typed(
+        &self,
+        dest: &mut thin_vec::ThinVec<crate::typed_om::TypedValue>,
+    ) -> Result<(), ()> {
+        let keyword = match self {
+            Self::Specified(generics::FontStyle::Italic) => "italic",
+            Self::Specified(generics::FontStyle::Oblique(angle)) => {
+                if *angle == Angle::zero() {
+                    "normal"
+                } else if *angle == SpecifiedFontStyle::default_angle() {
+                    "oblique"
+                } else {
+                    return Err(());
+                }
+            },
+            Self::System(..) => return Err(()),
+        };
+        dest.push(crate::typed_om::TypedValue::Keyword(
+            crate::typed_om::KeywordValue(keyword.into()),
+        ));
+        Ok(())
+    }
 }
 
 impl FontStyle {
