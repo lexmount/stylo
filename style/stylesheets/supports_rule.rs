@@ -242,13 +242,13 @@ fn eval_font_tech(flag: &FontFaceSourceTechFlags) -> bool {
 }
 
 #[cfg(feature = "servo")]
-fn eval_font_format(_: &FontFaceSourceFormatKeyword) -> bool {
-    false
+fn eval_font_format(kw: &FontFaceSourceFormatKeyword) -> bool {
+    crate::moli_font_face::supports_font_format(*kw)
 }
 
 #[cfg(feature = "servo")]
-fn eval_font_tech(_: &FontFaceSourceTechFlags) -> bool {
-    false
+fn eval_font_tech(flag: &FontFaceSourceTechFlags) -> bool {
+    crate::moli_font_face::supports_font_tech(*flag)
 }
 
 /// supports_condition | declaration

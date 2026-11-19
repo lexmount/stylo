@@ -49,7 +49,9 @@ pub struct CssUrlData {
 
 impl ToShmem for CssUrl {
     fn to_shmem(&self, _builder: &mut SharedMemoryBuilder) -> to_shmem::Result<Self> {
-        unimplemented!("If servo wants to share stylesheets across processes, ToShmem for Url must be implemented");
+        unimplemented!(
+            "If servo wants to share stylesheets across processes, ToShmem for Url must be implemented"
+        );
     }
 }
 
@@ -115,6 +117,15 @@ impl CssUrl {
         }
     }
 
+    /// Return the specified URL before resolution, when available.
+    pub fn as_specified_str(&self) -> &str {
+        self.original
+            .as_deref()
+            .map(String::as_str)
+            .or_else(|| self.url().map(|url| url.as_str()))
+            .unwrap_or("about:invalid")
+    }
+
     /// Creates an already specified url value from an already resolved URL
     /// for insertion in the cascade.
     pub fn for_cascade(url: Arc<::url::Url>) -> Self {
@@ -151,19 +162,8 @@ impl ToCss for CssUrl {
     where
         W: Write,
     {
-        let string = match self.0.original {
-            Some(ref original) => &**original,
-            None => match self.resolved {
-                Some(ref url) => url.as_str(),
-                // This can only happen if the url wasn't specified by the
-                // user *and* it's an invalid url that has been transformed
-                // back to specified value via the "uncompute" functionality.
-                None => "about:invalid",
-            },
-        };
-
         dest.write_str("url(")?;
-        string.to_css(dest)?;
+        self.as_specified_str().to_css(dest)?;
         dest.write_char(')')
     }
 }

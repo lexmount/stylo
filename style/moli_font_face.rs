@@ -1,4 +1,4 @@
-//! Moli-facing `@font-face` parsing hooks.
+//! Moli-facing font capabilities and `@font-face` parsing hooks.
 
 use std::borrow::Cow;
 
@@ -10,7 +10,10 @@ use style_traits::{CssWriter, ParsingMode, ToCss};
 use crate::{
     context::QuirksMode,
     custom_properties::AttrTaint,
-    font_face::{SourceList, parse_font_face_block},
+    font_face::{
+        FontFaceSourceFormat, FontFaceSourceFormatKeyword, FontFaceSourceTechFlags, SourceList,
+        UrlSource, parse_font_face_block,
+    },
     parser::{Parse, ParserContext},
     stylesheets::{CssRuleType, Namespaces, Origin, UrlExtraData},
 };
@@ -34,14 +37,63 @@ pub fn parse_font_faces(css_text: &str) -> Vec<CssFontFace> {
 }
 
 pub fn normalize_font_face_src(value: &str) -> Option<String> {
+    to_css_string(&parse_font_face_source_list(value)?)
+}
+
+/// Parse a source list for which the caller resolves relative URLs.
+pub fn parse_font_face_source_list(value: &str) -> Option<SourceList> {
     with_font_face_context(|context| {
-        let input = value;
-        let mut parser = Parser::new(input);
-        let source_list = parser
+        Parser::new(value)
             .parse_entirely(|input| SourceList::parse(context, input))
-            .ok()?;
-        to_css_string(&source_list)
+            .ok()
     })?
+}
+
+/// Font formats supported by Moli's font loader.
+pub fn supports_font_format(format: FontFaceSourceFormatKeyword) -> bool {
+    use FontFaceSourceFormatKeyword::*;
+    matches!(format, Collection | Opentype | Truetype | Woff | Woff2)
+}
+
+/// Whether Moli can use a font requiring all the specified technologies.
+pub fn supports_font_tech(tech: FontFaceSourceTechFlags) -> bool {
+    use FontFaceSourceTechFlags as Tech;
+    let supported = Tech::FEATURES_OPENTYPE
+        | Tech::COLOR_COLRV0
+        | Tech::COLOR_COLRV1
+        | Tech::COLOR_SBIX
+        | Tech::COLOR_CBDT
+        | Tech::VARIATIONS;
+    supported.contains(tech)
+}
+
+/// Whether Moli can try loading a URL with these format and technology hints.
+pub fn supports_font_source(source: &UrlSource) -> bool {
+    supports_font_tech(source.tech_flags)
+        && source.format_hint.as_ref().is_none_or(|hint| match hint {
+            FontFaceSourceFormat::Keyword(format) => supports_font_format(*format),
+            FontFaceSourceFormat::String(format) => supports_legacy_format_hint(format),
+        })
+}
+
+fn supports_legacy_format_hint(format: &str) -> bool {
+    if !format
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return false;
+    }
+    let format = format.to_ascii_lowercase();
+    let format = match format.as_str() {
+        "otf" | "opentype-variations" => "opentype",
+        "ttf" | "truetype-variations" => "truetype",
+        "woff-variations" => "woff",
+        "woff2-variations" => "woff2",
+        format => format,
+    };
+    Parser::new(format)
+        .parse_entirely(FontFaceSourceFormatKeyword::parse)
+        .is_ok_and(supports_font_format)
 }
 
 fn with_font_face_context<R>(f: impl FnOnce(&ParserContext) -> R) -> Option<R> {

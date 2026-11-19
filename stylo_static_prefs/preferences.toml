@@ -18,7 +18,7 @@
 "layout.css.ellipse-corners.enabled" = false
 "layout.css.fit-content-function.enabled" = true
 "layout.css.font-palette.enabled" = false
-"layout.css.font-tech.enabled" = false
+"layout.css.font-tech.enabled" = true
 "layout.css.grid-template-masonry-value.enabled" = false
 "layout.css.grid-template-subgrid-value.enabled" = false
 "layout.css.has-selector.enabled" = false
