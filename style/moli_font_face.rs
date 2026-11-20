@@ -59,6 +59,7 @@ pub fn supports_font_format(format: FontFaceSourceFormatKeyword) -> bool {
 pub fn supports_font_tech(tech: FontFaceSourceTechFlags) -> bool {
     use FontFaceSourceTechFlags as Tech;
     let supported = Tech::FEATURES_OPENTYPE
+        | Tech::FEATURES_AAT
         | Tech::COLOR_COLRV0
         | Tech::COLOR_COLRV1
         | Tech::COLOR_SBIX
