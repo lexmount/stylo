@@ -826,7 +826,9 @@ pub struct TypedValueList {
 ///   other internal bits, such as `contain: size`.
 ///
 /// * `#[typed(skip_derive_fields)]` on the type disables recursion for
-///   structs and data-carrying enum variants.
+///   structs and data-carrying enum variants. A single iterable field may
+///   still produce its `#[css(if_empty = "...")]` keyword without requiring
+///   its elements to implement `ToTyped`.
 ///
 /// * `#[css(skip)]`, `#[typed(skip)]`, or `#[typed(todo)]` on a variant cause
 ///   that variant to be treated as unsupported (the derived implementation
@@ -918,6 +920,13 @@ pub trait ToTyped {
         self.to_typed(&mut dest).ok()?;
         Some(TypedValueList { values: dest })
     }
+
+    /// Reify a computed value, resolving calculations when the specified and
+    /// computed representations share a type. Other types use their ordinary
+    /// reification. Values needing unavailable context remain unrepresentable.
+    fn to_computed_typed_value_list(&self) -> Option<TypedValueList> {
+        self.to_typed_value_list()
+    }
 }
 
 impl<T> ToTyped for &T
@@ -926,6 +935,10 @@ where
 {
     fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
         (*self).to_typed(dest)
+    }
+
+    fn to_computed_typed_value_list(&self) -> Option<TypedValueList> {
+        (*self).to_computed_typed_value_list()
     }
 }
 
@@ -936,6 +949,10 @@ where
     fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
         (**self).to_typed(dest)
     }
+
+    fn to_computed_typed_value_list(&self) -> Option<TypedValueList> {
+        (**self).to_computed_typed_value_list()
+    }
 }
 
 impl<T> ToTyped for Arc<T>
@@ -944,6 +961,10 @@ where
 {
     fn to_typed(&self, dest: &mut ThinVec<TypedValue>) -> Result<(), ()> {
         (**self).to_typed(dest)
+    }
+
+    fn to_computed_typed_value_list(&self) -> Option<TypedValueList> {
+        (**self).to_computed_typed_value_list()
     }
 }
 

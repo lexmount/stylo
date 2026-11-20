@@ -367,15 +367,37 @@ impl SpecifiedFontStyle {
 }
 
 /// The specified value of the `font-style` property.
-#[derive(
-    Clone, Debug, MallocSizeOf, Parse, PartialEq, SpecifiedValueInfo, ToCss, ToShmem, ToTyped,
-)]
+#[derive(Clone, Debug, MallocSizeOf, Parse, PartialEq, SpecifiedValueInfo, ToCss, ToShmem)]
 #[allow(missing_docs)]
-#[typed(todo_derive_fields)]
 pub enum FontStyle {
     Specified(SpecifiedFontStyle),
     #[css(skip)]
     System(SystemFont),
+}
+
+impl crate::typed_om::ToTyped for FontStyle {
+    fn to_typed(
+        &self,
+        dest: &mut thin_vec::ThinVec<crate::typed_om::TypedValue>,
+    ) -> Result<(), ()> {
+        let keyword = match self {
+            Self::Specified(generics::FontStyle::Italic) => "italic",
+            Self::Specified(generics::FontStyle::Oblique(angle)) => {
+                if *angle == Angle::zero() {
+                    "normal"
+                } else if *angle == SpecifiedFontStyle::default_angle() {
+                    "oblique"
+                } else {
+                    return Err(());
+                }
+            },
+            Self::System(..) => return Err(()),
+        };
+        dest.push(crate::typed_om::TypedValue::Keyword(
+            crate::typed_om::KeywordValue(keyword.into()),
+        ));
+        Ok(())
+    }
 }
 
 impl FontStyle {
@@ -1118,8 +1140,10 @@ bitflags! {
     ToComputedValue,
     ToResolvedValue,
     ToShmem,
+    ToTyped,
 )]
 #[repr(C, u8)]
+#[typed(skip_derive_fields)]
 /// Set of variant alternates
 pub enum VariantAlternates {
     /// Enables display of stylistic alternates
@@ -1161,7 +1185,6 @@ pub enum VariantAlternates {
     ToTyped,
 )]
 #[repr(transparent)]
-#[typed(todo_derive_fields)]
 /// List of Variant Alternates
 pub struct FontVariantAlternates(
     #[css(if_empty = "normal", iterable)] crate::OwnedSlice<VariantAlternates>,
@@ -1641,13 +1664,33 @@ pub enum FontSynthesisStyle {
     ToComputedValue,
     ToResolvedValue,
     ToShmem,
-    ToTyped,
 )]
 #[repr(C)]
-#[typed(todo_derive_fields)]
 /// Allows authors to choose a palette from those supported by a color font
 /// (and potentially @font-palette-values overrides).
 pub struct FontPalette(Atom);
+
+impl crate::typed_om::ToTyped for FontPalette {
+    fn to_typed(
+        &self,
+        dest: &mut thin_vec::ThinVec<crate::typed_om::TypedValue>,
+    ) -> Result<(), ()> {
+        let keyword = if self.0 == atom!("normal") {
+            "normal"
+        } else if self.0 == atom!("light") {
+            "light"
+        } else if self.0 == atom!("dark") {
+            "dark"
+        } else {
+            // Named palettes use the property-associated representation.
+            return Err(());
+        };
+        dest.push(crate::typed_om::TypedValue::Keyword(
+            crate::typed_om::KeywordValue(keyword.into()),
+        ));
+        Ok(())
+    }
+}
 
 #[allow(missing_docs)]
 impl FontPalette {

@@ -154,6 +154,8 @@ pub struct ContainerCondition {
     flags: FeatureFlags,
     #[css(skip)]
     attributes_referenced: AttrReferenceSet,
+    #[css(skip)]
+    dynamic_attribute_references: bool,
 }
 
 /// The result of a successful container query lookup.
@@ -239,9 +241,9 @@ impl ContainerCondition {
             return Err(ParseError::custom(StyleParseErrorKind::UnspecifiedError));
         }
         let mut attributes_referenced = AttrReferenceSet::default();
-        if let Some(c) = condition.as_ref() {
-            c.collect_attribute_references(&mut attributes_referenced)
-        }
+        let dynamic_attribute_references = condition
+            .as_ref()
+            .is_some_and(|c| c.collect_attribute_references(&mut attributes_referenced));
         let flags = condition
             .as_ref()
             .map_or(FeatureFlags::empty(), |c| c.cumulative_flags());
@@ -250,6 +252,7 @@ impl ContainerCondition {
             condition,
             flags,
             attributes_referenced,
+            dynamic_attribute_references,
         })
     }
 
@@ -417,12 +420,16 @@ impl ContainerCondition {
         &self,
         kind_map: &mut PrecomputedHashMap<LocalName, ContainerAttributeDependencyKind>,
         attribute_dependencies: &mut AttrReferenceSet,
+        dynamic_kind: &mut ContainerAttributeDependencyKind,
     ) {
         let name_kind = if self.name.is_none() {
             ContainerAttributeDependencyKind::UnnamedContainer
         } else {
             ContainerAttributeDependencyKind::NamedContainer
         };
+        if self.dynamic_attribute_references {
+            *dynamic_kind = std::cmp::max(*dynamic_kind, name_kind);
+        }
         for attr in self.get_attributes_referenced() {
             kind_map
                 .entry(attr.clone())

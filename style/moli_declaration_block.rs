@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 
 use cssparser::Parser;
+use servo_arc::Arc;
 use style_traits::{CssString, ParsingMode};
 
 use crate::{
@@ -69,6 +70,26 @@ impl CssDeclarationBlock {
         let mut output = CssString::new();
         self.block.to_css(&mut output).ok();
         output
+    }
+
+    /// Serialize declaration input without dropping the prefixed grammar needed
+    /// by extended mask-composite operators and deferred substitution.
+    pub fn style_resolution_text(&self) -> String {
+        declaration_block_style_resolution_text(&self.block)
+    }
+
+    /// Apply the native declaration's grammar to a renderer projection while
+    /// preserving every value token and custom-property byte.
+    pub fn project_style_resolution_names(&self, text: String) -> String {
+        if self
+            .block
+            .declaration_importance_iter()
+            .any(|(declaration, _)| declaration.uses_legacy_mask_composite_syntax())
+        {
+            project_mask_composite_alias(text)
+        } else {
+            text
+        }
     }
 
     pub fn item(&self, index: usize) -> Option<String> {
@@ -142,7 +163,7 @@ impl CssDeclarationBlock {
         else {
             return CssMutationProjection::parse_error();
         };
-        let before_css_text = self.css_text();
+        let before = self.block.clone();
         let modified_existing = self
             .block
             .first_declaration_to_remove(&parsed.property)
@@ -150,8 +171,7 @@ impl CssDeclarationBlock {
         self.remove_property_by_id(&parsed.property);
         self.block
             .extend(parsed.declarations.drain(), parsed.importance);
-        let after_css_text = self.css_text();
-        let set_result = if after_css_text == before_css_text {
+        let set_result = if self.block == before {
             CssSetResult::Unchanged
         } else if modified_existing {
             CssSetResult::ModifiedExisting
@@ -183,6 +203,26 @@ impl CssDeclarationBlock {
         self.block
     }
 
+    /// Restore native pending substitutions after reparsing CSSOM text in its
+    /// owning cascade context. A partially overwritten shorthand's surviving
+    /// longhands serialize as empty values and cannot be recovered from text.
+    pub fn restore_pending_substitutions(
+        &self,
+        block: &mut PropertyDeclarationBlock,
+        url_data: &UrlExtraData,
+    ) {
+        for (declaration, importance) in self.block.declaration_importance_iter() {
+            let PropertyDeclaration::WithVariables(variable) = declaration else {
+                continue;
+            };
+            let mut variable = variable.clone();
+            variable.value = Arc::new(variable.value.with_url_data(url_data));
+            // A compatibility `all` declaration can still win by importance
+            // in the text-parsed cascade even though CSSOM stores it separately.
+            block.push(PropertyDeclaration::WithVariables(variable), importance);
+        }
+    }
+
     fn property_value_by_id(&self, property: &PropertyId) -> String {
         let mut output = CssString::new();
         self.block.property_value_to_css(property, &mut output).ok();
@@ -200,6 +240,47 @@ impl CssDeclarationBlock {
             old_value: Some(old_value),
         }
     }
+}
+
+pub(crate) fn declaration_block_style_resolution_text(block: &PropertyDeclarationBlock) -> String {
+    let mut output = CssString::new();
+    block.to_css(&mut output).ok();
+    if block
+        .declaration_importance_iter()
+        .any(|(declaration, _)| declaration.uses_legacy_mask_composite_syntax())
+    {
+        project_mask_composite_alias(output)
+    } else {
+        output
+    }
+}
+
+fn project_mask_composite_alias(mut text: String) -> String {
+    let mut input = Parser::new(&text);
+    let mut declaration_start = true;
+    let mut names = Vec::new();
+    loop {
+        let start = input.position().byte_index();
+        let Ok(token) = input.next_including_whitespace_and_comments().cloned() else {
+            break;
+        };
+        match token {
+            cssparser::Token::WhiteSpace(_) | cssparser::Token::Comment(_) => {},
+            cssparser::Token::Semicolon => declaration_start = true,
+            cssparser::Token::Ident(name) if declaration_start => {
+                if name == "mask-composite" {
+                    names.push(start..input.position().byte_index());
+                }
+                declaration_start = false;
+            },
+            _ => declaration_start = false,
+        }
+    }
+    drop(input);
+    for range in names.into_iter().rev() {
+        text.replace_range(range, "-webkit-mask-composite");
+    }
+    text
 }
 
 impl CssMutationProjection {
@@ -396,6 +477,67 @@ fn with_declaration_context<R>(f: impl FnOnce(&ParserContext) -> R) -> Option<R>
 mod tests {
     use super::{CssDeclarationBlock, CssDeclarationEntry, CssSetResult, parse_declaration_block};
 
+    #[test]
+    fn pending_substitutions_keep_their_native_grammar_and_adopt_the_cascade_base() {
+        use crate::properties::{Importance, PropertyDeclaration};
+        use crate::stylesheets::UrlExtraData;
+
+        static_prefs::set_pref!("layout.unimplemented", true);
+
+        let mut source = parse_declaration_block(
+            "background: var(--paint) !important; -webkit-mask-composite: var(--operator);",
+        );
+        source.set_property("background-color", "blue", false);
+        let original = source.clone();
+        let mut reparsed = parse_declaration_block(&source.style_resolution_text()).into_inner();
+        let base =
+            UrlExtraData::from(url::Url::parse("https://example.org/styles/main.css").unwrap());
+        source.restore_pending_substitutions(&mut reparsed, &base);
+        let restored = CssDeclarationBlock::new(reparsed);
+        assert_eq!(
+            restored.property_value("background-color").as_deref(),
+            Some("blue")
+        );
+        assert!(!restored.property_priority("background-color"));
+        assert!(restored.property_priority("background-image"));
+        assert_eq!(
+            restored.property_value("background-image").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            source, original,
+            "cascade projection must not mutate CSSOM ownership"
+        );
+        let mut pending_count = 0;
+        for (declaration, importance) in restored.block.declaration_importance_iter() {
+            let PropertyDeclaration::WithVariables(value) = declaration else {
+                continue;
+            };
+            pending_count += 1;
+            assert_eq!(value.value.variable_value.url_data, base);
+            let source_declaration = source.block.get(declaration.id()).unwrap();
+            assert_eq!(importance, source_declaration.1);
+            if declaration.id().name() != "mask-composite" {
+                assert_eq!(importance, Importance::Important);
+            }
+        }
+        assert_eq!(pending_count, 9);
+        let ordinary = parse_declaration_block("background: var(--paint)");
+        let mut important = parse_declaration_block("all: initial !important").into_inner();
+        ordinary.restore_pending_substitutions(&mut important, &base);
+        let important = CssDeclarationBlock::new(important);
+        assert_eq!(
+            important.property_value("background-image").as_deref(),
+            Some("initial")
+        );
+        assert!(important.property_priority("background-image"));
+        assert!(
+            restored
+                .style_resolution_text()
+                .contains("-webkit-mask-composite: var(--operator)")
+        );
+    }
+
     fn set_projection_entries(
         block: &mut CssDeclarationBlock,
         name: &str,
@@ -415,7 +557,11 @@ mod tests {
             "calc(1px * exp(tan(atan2(50%, 1px))))",
         ] {
             let mut block = CssDeclarationBlock::default();
-            assert_eq!(block.set_property("width", value, false), CssSetResult::ParseError, "{value}");
+            assert_eq!(
+                block.set_property("width", value, false),
+                CssSetResult::ParseError,
+                "{value}"
+            );
         }
         for value in [
             "calc(1px * pow(tan(atan2(1px, 1px)), 1))",
@@ -424,7 +570,11 @@ mod tests {
             "calc(1px * sign(50%))",
         ] {
             let mut block = CssDeclarationBlock::default();
-            assert_ne!(block.set_property("width", value, false), CssSetResult::ParseError, "{value}");
+            assert_ne!(
+                block.set_property("width", value, false),
+                CssSetResult::ParseError,
+                "{value}"
+            );
         }
     }
 
@@ -776,6 +926,7 @@ mod tests {
 
     #[test]
     fn declaration_block_set_property_updates_through_pdb() {
+        static_prefs::set_pref!("layout.unimplemented", true);
         let mut block = parse_declaration_block("color: red !important; padding: 1px 2px;");
 
         let entries = set_projection_entries(&mut block, "color", "blue", false);

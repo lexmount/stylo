@@ -25,7 +25,6 @@ use crate::derives::*;
     ToTyped,
 )]
 #[repr(u8)]
-#[typed(todo_derive_fields)]
 pub enum GenericColumnCount<PositiveInteger> {
     /// A positive integer.
     Integer(PositiveInteger),

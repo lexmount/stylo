@@ -4079,7 +4079,7 @@ animation_type = "discrete"
 affects = "paint"
 vector = {}
 extra_prefixes = ["webkit"]
-keyword = { values = ["add", "subtract", "intersect", "exclude"] }
+keyword = { values = ["add", "subtract", "intersect", "exclude"], extra_servo_values = ["clear", "copy", "source-over", "source-in", "source-out", "source-atop", "destination-over", "destination-in", "destination-out", "destination-atop", "xor", "plus-lighter"], extra_servo_values_condition = "context.legacy_mask_composite" }
 
 [table-layout]
 struct = "table"

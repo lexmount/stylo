@@ -51,7 +51,20 @@ impl ToCss for TransitionProperty {
     }
 }
 
-impl ToTyped for TransitionProperty {}
+impl ToTyped for TransitionProperty {
+    fn to_typed(
+        &self,
+        dest: &mut thin_vec::ThinVec<crate::typed_om::TypedValue>,
+    ) -> Result<(), ()> {
+        if !self.is_none() {
+            return Err(());
+        }
+        dest.push(crate::typed_om::TypedValue::Keyword(
+            crate::typed_om::KeywordValue("none".into()),
+        ));
+        Ok(())
+    }
+}
 
 impl Parse for TransitionProperty {
     fn parse(context: &ParserContext, input: &mut Parser) -> Result<Self, ParseError> {

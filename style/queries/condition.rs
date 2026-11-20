@@ -22,10 +22,10 @@ use crate::properties_and_values::value::{
 use crate::stylesheets::container_rule::AttrReferenceSet;
 use crate::stylesheets::{CssRuleType, CustomMediaEvaluator, Origin, UrlExtraData};
 use crate::stylist::Stylist;
-use crate::values::{computed, AtomString, DashedIdent};
+use crate::values::{AtomString, DashedIdent, computed};
 use crate::{error_reporting::ContextualParseError, parser::Parse, parser::ParserContext};
 use cssparser::{
-    match_ignore_ascii_case, parse_important, Parser, SourceLocation, SourcePosition, Token,
+    Parser, SourceLocation, SourcePosition, Token, match_ignore_ascii_case, parse_important,
 };
 use selectors::kleene_value::KleeneValue;
 use servo_arc::Arc;
@@ -274,15 +274,15 @@ impl StyleQuery {
         }
     }
 
-    fn collect_attribute_references(&self, references: &mut AttrReferenceSet) {
+    fn collect_attribute_references(&self, references: &mut AttrReferenceSet) -> bool {
         match self {
             Self::Feature(c) => c.collect_attribute_references(references),
-            Self::GeneralEnclosed(_) => {},
+            Self::GeneralEnclosed(_) => false,
             Self::InParens(c) => c.collect_attribute_references(references),
             Self::Not(c) => c.collect_attribute_references(references),
-            Self::Operation(c, _) => c
-                .iter()
-                .for_each(|c| c.collect_attribute_references(references)),
+            Self::Operation(c, _) => c.iter().fold(false, |dynamic, c| {
+                c.collect_attribute_references(references) | dynamic
+            }),
         }
     }
 }
@@ -356,7 +356,7 @@ impl StyleFeature {
         }
     }
 
-    fn collect_attribute_references(&self, references: &mut AttrReferenceSet) {
+    fn collect_attribute_references(&self, references: &mut AttrReferenceSet) -> bool {
         match self {
             Self::Plain(plain) => plain.collect_attribute_references(references),
             Self::Range(range) => range.collect_attribute_references(references),
@@ -543,9 +543,11 @@ impl StyleFeaturePlain {
         })
     }
 
-    fn collect_attribute_references(&self, references: &mut AttrReferenceSet) {
+    fn collect_attribute_references(&self, references: &mut AttrReferenceSet) -> bool {
         if let StyleFeatureValue::Value(Some(v)) = &self.value {
             v.collect_attribute_references(references)
+        } else {
+            false
         }
     }
 }
@@ -928,9 +930,14 @@ impl QueryCondition {
     }
 
     /// Collect the attribute references in this query condition, if any.
-    pub fn collect_attribute_references(&self, references: &mut AttrReferenceSet) {
-        if let QueryCondition::Style(c) = self {
-            c.collect_attribute_references(references)
+    pub fn collect_attribute_references(&self, references: &mut AttrReferenceSet) -> bool {
+        match self {
+            Self::Style(c) => c.collect_attribute_references(references),
+            Self::Not(c) | Self::InParens(c) => c.collect_attribute_references(references),
+            Self::Operation(c, _) => c.iter().fold(false, |dynamic, c| {
+                c.collect_attribute_references(references) | dynamic
+            }),
+            _ => false,
         }
     }
 }

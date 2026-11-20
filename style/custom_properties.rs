@@ -13,7 +13,7 @@ use crate::parser::ParserContext;
 use crate::properties::{CSSWideKeyword, PrioritaryPropertyId};
 use crate::properties_and_values::{
     rule::Descriptors as PropertyDescriptors,
-    syntax::Descriptor as SyntaxDescriptor,
+    syntax::{ComponentName, Descriptor as SyntaxDescriptor, data_type::DataType},
     value::{
         AllowComputationallyDependent, ComputedValue as ComputedRegisteredValue,
         SpecifiedIdentFunction, SpecifiedValue as SpecifiedRegisteredValue,
@@ -287,6 +287,15 @@ fn custom_property_name_from_ident(ident: &str) -> Option<Name> {
 pub(crate) enum SubstitutionFunctionName {
     Static(Name),
     DynamicIdent(SpecifiedIdentFunction),
+    AttrArguments(Box<AttributeArguments>),
+}
+
+/// The first attr() argument is substituted before parsing its name and type.
+/// Keep it separate from the fallback so a substituted comma cannot split it.
+#[derive(Clone, Debug, MallocSizeOf, PartialEq, ToShmem)]
+pub(crate) struct AttributeArguments {
+    value: VariableValue,
+    namespaces: Option<ThinVec<(Prefix, Namespace)>>,
 }
 
 impl SubstitutionFunctionName {
@@ -313,7 +322,7 @@ impl SubstitutionFunctionName {
     pub(crate) fn as_static_name(&self) -> Option<&Name> {
         match *self {
             Self::Static(ref name) => Some(name),
-            Self::DynamicIdent(_) => None,
+            Self::DynamicIdent(_) | Self::AttrArguments(_) => None,
         }
     }
 
@@ -324,6 +333,7 @@ impl SubstitutionFunctionName {
                 let ident = function.to_computed_ident(context);
                 custom_property_name_from_ident(ident.0.as_ref())
             },
+            Self::AttrArguments(_) => None,
         }
     }
 
@@ -335,6 +345,7 @@ impl SubstitutionFunctionName {
         match *self {
             Self::Static(ref name) => format!("--{}", name),
             Self::DynamicIdent(ref function) => function.to_css_string(),
+            Self::AttrArguments(ref arguments) => arguments.value.css.clone(),
         }
     }
 }
@@ -822,6 +833,39 @@ pub struct AttributeData {
     namespace: ParsedNamespace,
 }
 
+impl AttributeData {
+    pub(crate) fn is_typed(&self) -> bool {
+        matches!(self.kind, AttributeType::Type(..))
+    }
+
+    pub(crate) fn value_matches_type(&self, attr: &str, url_data: &UrlExtraData) -> bool {
+        match &self.kind {
+            AttributeType::Type(syntax) => parse_typed_attr_value(attr, syntax, url_data).is_some(),
+            _ => true,
+        }
+    }
+
+    pub(crate) fn untyped_value_is_valid(
+        &self,
+        name: &Name,
+        attribute_tracker: &mut AttributeTracker,
+    ) -> bool {
+        let ParsedNamespace::Known(namespace) = &self.namespace else {
+            return false;
+        };
+        let Some(attr) = LocalName::with_name(name, |local_name| {
+            attribute_tracker.query(local_name, namespace)
+        }) else {
+            return false;
+        };
+        match self.kind {
+            AttributeType::None | AttributeType::RawString => true,
+            AttributeType::Unit(_) => parse_attr_number_token(&attr).is_some(),
+            AttributeType::Invalid | AttributeType::Type(_) => false,
+        }
+    }
+}
+
 /// For a CSS string, the range, counted in bytes, that is attr()-tainted.
 #[derive(Clone, Debug, Default, MallocSizeOf, PartialEq, ToShmem, ToComputedValue)]
 pub struct AttrTaintedRange {
@@ -909,8 +953,50 @@ pub(crate) struct SubstitutionFunctionReference {
 impl SubstitutionFunctionReference {
     /// Whether we're an attr(... type(...)) reference.
     pub fn is_attr_with_type(&self) -> bool {
-        self.substitution_kind == SubstitutionFunctionKind::Attr
-            && matches!(self.attribute_data.kind, AttributeType::Type(..))
+        self.substitution_kind == SubstitutionFunctionKind::Attr && self.attribute_data.is_typed()
+    }
+
+    pub(crate) fn attr_arguments(&self) -> Option<&VariableValue> {
+        match &self.name {
+            SubstitutionFunctionName::AttrArguments(arguments) => Some(&arguments.value),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn resolve_attr(
+        &self,
+        substitution_functions: &ComputedSubstitutionFunctions,
+        stylist: &Stylist,
+        computed_context: &computed::Context,
+        attribute_tracker: &mut AttributeTracker,
+        seen: &mut SmallVec<[Name; 8]>,
+    ) -> Option<(Name, Cow<'_, AttributeData>)> {
+        match &self.name {
+            SubstitutionFunctionName::Static(name) => {
+                Some((name.clone(), Cow::Borrowed(&self.attribute_data)))
+            },
+            SubstitutionFunctionName::AttrArguments(arguments) => {
+                let substituted = substitute_internal(
+                    &arguments.value,
+                    substitution_functions,
+                    stylist,
+                    computed_context,
+                    attribute_tracker,
+                    seen,
+                    None,
+                )
+                .ok()?;
+                let namespaces = arguments
+                    .namespaces
+                    .as_ref()
+                    .map(|namespaces| namespaces.iter().cloned().collect::<FxHashMap<_, _>>());
+                let (name, data) = Parser::new(&substituted.css)
+                    .parse_entirely(|input| parse_attr_arguments(input, namespaces.as_ref()))
+                    .ok()?;
+                Some((name, Cow::Owned(data)))
+            },
+            SubstitutionFunctionName::DynamicIdent(_) => None,
+        }
     }
 }
 
@@ -1024,6 +1110,14 @@ impl VariableValue {
         namespaces: Option<&FxHashMap<Prefix, Namespace>>,
         url_data: &UrlExtraData,
     ) -> Result<Self, ParseError> {
+        Self::parse_with_closing_characters(input, namespaces, url_data).map(|(value, _)| value)
+    }
+
+    fn parse_with_closing_characters(
+        input: &mut Parser,
+        namespaces: Option<&FxHashMap<Prefix, Namespace>>,
+        url_data: &UrlExtraData,
+    ) -> Result<(Self, String), ParseError> {
         let mut references = References::default();
         let mut missing_closing_characters = String::new();
         let start_position = input.position();
@@ -1053,14 +1147,17 @@ impl VariableValue {
         css.shrink_to_fit();
         references.refs.shrink_to_fit();
 
-        Ok(Self {
-            css,
-            url_data: url_data.clone(),
-            first_token_type,
-            last_token_type,
-            references,
-            explicitly_attr_tainted: false,
-        })
+        Ok((
+            Self {
+                css,
+                url_data: url_data.clone(),
+                first_token_type,
+                last_token_type,
+                references,
+                explicitly_attr_tainted: false,
+            },
+            missing_closing_characters,
+        ))
     }
 
     /// Returns whether this value is tainted by `attr()`.
@@ -1153,26 +1250,59 @@ impl VariableValue {
         self.references.has_references()
     }
 
-    /// Returns the attribute references in this variable value, if any.
-    pub fn collect_attribute_references(&self, references: &mut AttrReferenceSet) {
-        self.references.refs.iter().for_each(|r| {
-            if r.substitution_kind == SubstitutionFunctionKind::Attr {
-                // For a non-ascii-lowercase attribute, whether we match
-                // case-sensitively depends on whether the element we're
-                // matching against is an HTML element in an HTML document.
-                // So to simplify invalidation we collect both potential
-                // references here.
-                let Some(name) = r.name.as_static_name() else {
-                    return;
+    /// Collect attribute names, returning whether substitution can produce a dynamic name.
+    pub fn collect_attribute_references(&self, references: &mut AttrReferenceSet) -> bool {
+        let mut dynamic = false;
+        let mut stack = SmallVec::<[&References; 5]>::new();
+        stack.push(&self.references);
+        while let Some(refs) = stack.pop() {
+            for reference in &refs.refs {
+                if let Some(fallback) = &reference.fallback {
+                    stack.push(&fallback.references);
+                }
+                if let Some(arguments) = reference.attr_arguments() {
+                    dynamic |= arguments.has_references();
+                    stack.push(&arguments.references);
+                }
+                if reference.substitution_kind != SubstitutionFunctionKind::Attr {
+                    continue;
+                }
+                let Some(name) = reference.name.as_static_name() else {
+                    continue;
                 };
+                // Attribute matching can be ASCII-insensitive in HTML.
                 references.insert(name.clone().into());
                 let lowercase = name.to_ascii_lowercase();
                 if *name != lowercase {
                     references.insert(lowercase.into());
                 }
             }
-        })
+        }
+        dynamic
     }
+}
+
+fn parse_attr_arguments(
+    input: &mut Parser,
+    namespaces: Option<&FxHashMap<Prefix, Namespace>>,
+) -> Result<(Name, AttributeData), ParseError> {
+    let mut namespace = ParsedNamespace::default();
+    if let Some(namespaces) = namespaces {
+        if let Ok(ns) = input.try_parse(|input| ParsedNamespace::parse(namespaces, input)) {
+            namespace = ns;
+            // A namespace separator must be immediately followed by the name.
+            let state = input.state();
+            let result = match input.next_including_whitespace()? {
+                Token::Ident(_) => Ok(()),
+                _ => Err(ParseError::unexpected_token()),
+            };
+            input.reset(&state);
+            result?;
+        }
+    }
+    let name = Atom::from(input.expect_ident()?.as_ref());
+    let kind = parse_attr_type(input);
+    Ok((name, AttributeData { kind, namespace }))
 }
 
 /// <https://drafts.csswg.org/css-syntax-3/#typedef-declaration-value>
@@ -1284,42 +1414,79 @@ fn parse_declaration_value_block(
                     let our_ref_index = references.refs.len();
                     let mut input_end_position = None;
                     let fallback = input.parse_nested_block(|input| {
-                        let mut namespace = ParsedNamespace::Known(Namespace::default());
-                        if substitution_kind == SubstitutionFunctionKind::Attr {
-                            if let Some(namespaces) = namespaces {
-                                if let Ok(ns) = input
-                                    .try_parse(|input| ParsedNamespace::parse(namespaces, input))
-                                {
-                                    namespace = ns;
-                                    let prev = input.state();
-                                    let next = match *input.next_including_whitespace()? {
-                                        Token::Ident(_) => Ok(()),
-                                        _ => Err(ParseError::unexpected_token()),
-                                    };
-                                    input.reset(&prev);
-                                    next?;
+                        let (name, attribute_data) = if substitution_kind
+                            == SubstitutionFunctionKind::Attr
+                        {
+                            let value = input.parse_until_before(Delimiter::Comma, |input| {
+                                input.skip_whitespace();
+                                if input.is_exhausted() {
+                                    return Err(ParseError::unexpected_token());
                                 }
+                                let (value, missing) =
+                                    VariableValue::parse_with_closing_characters(
+                                        input, namespaces, url_data,
+                                    )?;
+                                missing_closing_characters.push_str(&missing);
+                                Ok(value)
+                            })?;
+                            references.flags |= value.references.flags;
+                            let parsed = if !value.has_references() {
+                                Parser::new(&value.css)
+                                    .parse_entirely(|input| parse_attr_arguments(input, namespaces))
+                                    .ok()
+                            } else {
+                                None
+                            };
+                            if let Some((name, data)) = parsed {
+                                (SubstitutionFunctionName::Static(name), data)
+                            } else {
+                                (
+                                    SubstitutionFunctionName::AttrArguments(Box::new(
+                                        AttributeArguments {
+                                            value,
+                                            namespaces: namespaces.map(|map| {
+                                                map.iter()
+                                                    .map(|(prefix, namespace)| {
+                                                        (prefix.clone(), namespace.clone())
+                                                    })
+                                                    .collect()
+                                            }),
+                                        },
+                                    )),
+                                    AttributeData {
+                                        kind: AttributeType::Invalid,
+                                        namespace: ParsedNamespace::default(),
+                                    },
+                                )
                             }
-                        }
-                        // TODO(emilio): For env() this should be <custom-ident> per spec, but no other browser does
-                        // that, see https://github.com/w3c/csswg-drafts/issues/3262.
-                        let name = if substitution_kind == SubstitutionFunctionKind::Var {
-                            let context = ParserContext::new(
-                                Origin::Author,
-                                url_data,
-                                Some(CssRuleType::Style),
-                                ParsingMode::DEFAULT,
-                                QuirksMode::NoQuirks,
-                                /* namespaces = */ Default::default(),
-                                None,
-                                None,
-                                Default::default(),
-                            );
-                            parse_var_reference_name(input, &context)?
                         } else {
-                            SubstitutionFunctionName::from_static_name(Atom::from(
-                                input.expect_ident()?.as_ref(),
-                            ))
+                            // TODO(emilio): For env() this should be <custom-ident> per spec,
+                            // but no other browser does that, see csswg-drafts#3262.
+                            let name = if substitution_kind == SubstitutionFunctionKind::Var {
+                                let context = ParserContext::new(
+                                    Origin::Author,
+                                    url_data,
+                                    Some(CssRuleType::Style),
+                                    ParsingMode::DEFAULT,
+                                    QuirksMode::NoQuirks,
+                                    Default::default(),
+                                    None,
+                                    None,
+                                    Default::default(),
+                                );
+                                parse_var_reference_name(input, &context)?
+                            } else {
+                                SubstitutionFunctionName::from_static_name(Atom::from(
+                                    input.expect_ident()?.as_ref(),
+                                ))
+                            };
+                            (
+                                name,
+                                AttributeData {
+                                    kind: AttributeType::None,
+                                    namespace: ParsedNamespace::default(),
+                                },
+                            )
                         };
                         if name.has_font_relative_length() {
                             references.flags.insert(ReferenceFlags::FONT_UNITS);
@@ -1344,13 +1511,6 @@ fn parse_declaration_value_block(
                             }
                         }
 
-                        let attribute_kind = if substitution_kind == SubstitutionFunctionKind::Attr
-                        {
-                            parse_attr_type(input)
-                        } else {
-                            AttributeType::None
-                        };
-
                         // We want the order of the references to match source order. So we need to reserve our slot
                         // now, _before_ parsing our fallback. Note that we don't care if parsing fails after all, since
                         // if this fails we discard the whole result anyways.
@@ -1365,10 +1525,7 @@ fn parse_declaration_value_block(
                             next_token_type: TokenSerializationType::Nothing,
                             // To be fixed up after parsing fallback.
                             fallback: None,
-                            attribute_data: AttributeData {
-                                kind: attribute_kind,
-                                namespace,
-                            },
+                            attribute_data,
                             substitution_kind,
                         });
 
@@ -1486,9 +1643,18 @@ fn parse_attr_type(input: &mut Parser) -> AttributeType {
     input
         .try_parse(|input| {
             Ok(match input.next()? {
-                Token::Function(name) if name.eq_ignore_ascii_case("type") => AttributeType::Type(
-                    input.parse_nested_block(SyntaxDescriptor::from_css_parser)?,
-                ),
+                Token::Function(name) if name.eq_ignore_ascii_case("type") => {
+                    let syntax = input.parse_nested_block(SyntaxDescriptor::from_css_parser)?;
+                    // <url> is not an allowed syntax component for attr(), even
+                    // in a list or an alternative that matches another type.
+                    if syntax.components.iter().any(|component| {
+                        matches!(component.name(), ComponentName::DataType(DataType::Url))
+                    }) {
+                        AttributeType::Invalid
+                    } else {
+                        AttributeType::Type(syntax)
+                    }
+                },
                 Token::Ident(ident) => {
                     if ident.eq_ignore_ascii_case("raw-string") {
                         AttributeType::RawString
@@ -1524,6 +1690,23 @@ pub fn get_attr_value_for_cycle_resolution(
     // TODO(Bug 2021110): Support namespaced attributes in chained references.
     let value = VariableValue::parse(&mut parser, None, url_data).map_err(|_| ())?;
     Ok(ComputedRegisteredValue::universal(Arc::new(value)))
+}
+
+/// Parse typed attribute values consistently during dependency traversal and substitution.
+fn parse_typed_attr_value(
+    attr: &str,
+    syntax: &SyntaxDescriptor,
+    url_data: &UrlExtraData,
+) -> Option<SpecifiedRegisteredValue> {
+    SpecifiedRegisteredValue::parse(
+        &mut Parser::new(attr),
+        syntax,
+        url_data,
+        None,
+        AllowComputationallyDependent::Yes,
+        AttrTaint::default(),
+    )
+    .ok()
 }
 
 /// See https://drafts.csswg.org/css-variables-2/#invalid-at-computed-value-time
@@ -1897,6 +2080,20 @@ fn quoted_css_string(src: &str) -> String {
     dest
 }
 
+/// Parse exactly one number token, excluding surrounding whitespace and comments.
+/// Keep its representation to preserve integer flags, signed zero and exponents
+/// without introducing another floating-point conversion during substitution.
+fn parse_attr_number_token(attr: &str) -> Option<&str> {
+    Parser::new(attr)
+        .parse_entirely(|input| -> Result<_, ParseError> {
+            input.skip_whitespace();
+            let start = input.position();
+            input.expect_number()?;
+            Ok(input.slice_from(start))
+        })
+        .ok()
+}
+
 fn substitute_one_reference<'a>(
     css: &'a str,
     url_data: &UrlExtraData,
@@ -1970,99 +2167,97 @@ fn substitute_one_reference<'a>(
                 .map(|v| Substitution::from_value(v, /* attr_tainted */ false))
         },
         // https://drafts.csswg.org/css-values-5/#attr-substitution
-        SubstitutionFunctionKind::Attr => {
-            let Some(name) = reference.name.as_static_name() else {
-                return Err(());
-            };
-            #[cfg(feature = "gecko")]
-            let local_name = LocalName::cast(name);
-            #[cfg(feature = "servo")]
-            let _local_name = LocalName::from(name.as_ref());
-            let namespace = match reference.attribute_data.namespace {
-                ParsedNamespace::Known(ref ns) => Some(ns),
-                ParsedNamespace::Unknown => None,
-            };
-            namespace
-                .and_then(|namespace| {
-                    LocalName::with_name(name, |local_name| {
-                        attribute_tracker.query(local_name, namespace)
+        SubstitutionFunctionKind::Attr => reference
+            .resolve_attr(
+                substitution_functions,
+                stylist,
+                computed_context,
+                attribute_tracker,
+                seen,
+            )
+            .and_then(|(name, attribute_data)| {
+                #[cfg(feature = "gecko")]
+                let local_name = LocalName::cast(&name);
+                #[cfg(feature = "servo")]
+                let _local_name = LocalName::from(name.as_ref());
+                let namespace = match attribute_data.namespace {
+                    ParsedNamespace::Known(ref ns) => Some(ns),
+                    ParsedNamespace::Unknown => None,
+                };
+                namespace
+                    .and_then(|namespace| {
+                        LocalName::with_name(&name, |local_name| {
+                            attribute_tracker.query(local_name, namespace)
+                        })
                     })
-                })
-                .map_or_else(
-                    || {
-                        // Special case when fallback and <attr-type> are omitted.
-                        // See FAILURE: https://drafts.csswg.org/css-values-5/#attr-substitution
-                        if reference.fallback.is_none()
-                            && reference.attribute_data.kind == AttributeType::None
-                        {
-                            simple_attr_subst("")
-                        } else {
-                            None
-                        }
-                    },
-                    |attr| {
-                        let attr = if let AttributeType::Type(_) = &reference.attribute_data.kind {
-                            // If we're evaluating a container query, we haven't run the cascade
-                            // and populated substitution_functions.attributes, so we can't do the
-                            // get_attr() lookup here.
-                            // TODO: This means chained attr() references will not work reliably in
-                            // container style queries:
-                            // https://bugzilla.mozilla.org/show_bug.cgi?id=2028861
-                            if computed_context.in_container_query {
-                                attr
+                    .map_or_else(
+                        || {
+                            // Special case when fallback and <attr-type> are omitted.
+                            // See FAILURE: https://drafts.csswg.org/css-values-5/#attr-substitution
+                            if reference.fallback.is_none()
+                                && attribute_data.kind == AttributeType::None
+                            {
+                                simple_attr_subst("")
                             } else {
-                                substitution_functions
-                                    .get_attr(name)
-                                    .map(|v| v.to_variable_value())?
-                                    .css
+                                None
                             }
-                        } else {
-                            attr
-                        };
-                        let mut parser = Parser::new(&attr);
-                        match &reference.attribute_data.kind {
-                            AttributeType::Unit(unit) => {
-                                let css = {
-                                    // Verify that attribute data is a <number-token>.
-                                    parser.expect_number().ok()?;
-                                    let mut s = attr.clone();
-                                    s.push_str(unit.as_ref());
-                                    s
-                                };
-                                let serialization = match unit {
-                                    AttrUnit::Number => TokenSerializationType::Number,
-                                    AttrUnit::Percentage => TokenSerializationType::Percentage,
-                                    _ => TokenSerializationType::Dimension,
-                                };
-                                let value =
-                                    ComputedValue::new(css, url_data, serialization, serialization);
-                                Some(Substitution::from_value(
-                                    value, /* attr_tainted */ true,
-                                ))
-                            },
-                            AttributeType::Type(syntax) => {
-                                let value = SpecifiedRegisteredValue::parse(
-                                    &mut parser,
-                                    syntax,
-                                    url_data,
-                                    None,
-                                    AllowComputationallyDependent::Yes,
-                                    AttrTaint::default(),
-                                )
-                                .ok()?;
-                                let value = value.to_variable_value();
-                                Some(Substitution::from_value(
-                                    value, /* attr_tainted */ true,
-                                ))
-                            },
-                            AttributeType::RawString | AttributeType::None => {
-                                simple_attr_subst(&attr)
-                            },
-                            AttributeType::Invalid => None,
-                        }
-                    },
-                )
-        },
+                        },
+                        |attr| {
+                            let attr = if let AttributeType::Type(_) = &attribute_data.kind {
+                                // If we're evaluating a container query, we haven't run the cascade
+                                // and populated substitution_functions.attributes, so we can't do the
+                                // get_attr() lookup here.
+                                // TODO: This means chained attr() references will not work reliably in
+                                // container style queries:
+                                // https://bugzilla.mozilla.org/show_bug.cgi?id=2028861
+                                if computed_context.in_container_query {
+                                    attr
+                                } else {
+                                    substitution_functions
+                                        .get_attr(&name)
+                                        .map(|v| v.to_variable_value())?
+                                        .css
+                                }
+                            } else {
+                                attr
+                            };
+                            match &attribute_data.kind {
+                                AttributeType::Unit(unit) => {
+                                    let css = {
+                                        let mut s = parse_attr_number_token(&attr)?.to_owned();
+                                        s.push_str(unit.as_ref());
+                                        s
+                                    };
+                                    let serialization = match unit {
+                                        AttrUnit::Number => TokenSerializationType::Number,
+                                        AttrUnit::Percentage => TokenSerializationType::Percentage,
+                                        _ => TokenSerializationType::Dimension,
+                                    };
+                                    let value = ComputedValue::new(
+                                        css,
+                                        url_data,
+                                        serialization,
+                                        serialization,
+                                    );
+                                    Some(Substitution::from_value(
+                                        value, /* attr_tainted */ true,
+                                    ))
+                                },
+                                AttributeType::Type(syntax) => {
+                                    let value = parse_typed_attr_value(&attr, syntax, url_data)?;
+                                    let value = value.to_variable_value();
+                                    Some(Substitution::from_value(
+                                        value, /* attr_tainted */ true,
+                                    ))
+                                },
+                                AttributeType::RawString | AttributeType::None => {
+                                    simple_attr_subst(&attr)
+                                },
+                                AttributeType::Invalid => None,
+                            }
+                        },
+                    )
+            }),
     };
 
     if let Some(s) = substitution {

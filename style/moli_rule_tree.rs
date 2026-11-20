@@ -99,12 +99,19 @@ pub struct CssNamespaceRuleView {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CssContainerConditionView {
+    pub name: String,
+    pub query: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CssConditionRuleView {
     pub rule_type: CssRuleType,
     pub css_text: String,
     pub condition_text: String,
     pub container_name: Option<String>,
     pub container_query: Option<String>,
+    pub container_conditions: Vec<CssContainerConditionView>,
     pub scope_start: Option<String>,
     pub scope_end: Option<String>,
 }
@@ -1530,6 +1537,7 @@ fn condition_rule_view(
             condition_text: rule.media_queries.read_with(guard).to_css_string(),
             container_name: None,
             container_query: None,
+            container_conditions: Vec::new(),
             scope_start: None,
             scope_end: None,
         }),
@@ -1539,18 +1547,21 @@ fn condition_rule_view(
             condition_text: rule.condition.to_css_string(),
             container_name: None,
             container_query: None,
+            container_conditions: Vec::new(),
             scope_start: None,
             scope_end: None,
         }),
         CssRule::Container(rule) => {
+            let container_conditions = container_rule_cssom_conditions(&rule.conditions);
             let (container_name, container_query) =
-                container_rule_cssom_name_and_query(&rule.conditions);
+                container_rule_cssom_name_and_query(&container_conditions);
             Some(CssConditionRuleView {
                 rule_type: CssRuleType::Container,
                 css_text: rule.to_css_string(guard),
                 condition_text: rule.conditions.to_css_string(),
                 container_name,
                 container_query,
+                container_conditions,
                 scope_start: None,
                 scope_end: None,
             })
@@ -1561,6 +1572,7 @@ fn condition_rule_view(
             condition_text: scope_rule_condition_text(rule),
             container_name: None,
             container_query: None,
+            container_conditions: Vec::new(),
             scope_start: rule
                 .bounds
                 .start
@@ -1576,24 +1588,37 @@ fn condition_rule_view(
     }
 }
 
-fn container_rule_cssom_name_and_query(
+/// Serialize the parsed conditions without splitting commas inside names or queries.
+pub fn container_rule_cssom_conditions(
     conditions: &crate::stylesheets::container_rule::ContainerConditions,
+) -> Vec<CssContainerConditionView> {
+    conditions
+        .0
+        .iter()
+        .map(|condition| CssContainerConditionView {
+            name: if condition.name().is_none() {
+                String::new()
+            } else {
+                condition.name().to_css_string()
+            },
+            query: condition
+                .query_condition()
+                .map(ToCss::to_css_string)
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn container_rule_cssom_name_and_query(
+    conditions: &[CssContainerConditionView],
 ) -> (Option<String>, Option<String>) {
-    let Some(first) = conditions.0.iter().next() else {
+    let [condition] = conditions else {
         return (None, None);
     };
-    let name = (!first.name().is_none()).then(|| first.name().to_css_string());
-    let mut query_parts = Vec::new();
-    if name.is_some() {
-        if let Some(condition) = first.query_condition() {
-            query_parts.push(condition.to_css_string());
-        }
-    } else {
-        query_parts.push(first.to_css_string());
-    }
-    query_parts.extend(conditions.0.iter().skip(1).map(ToCss::to_css_string));
-    let query = (!query_parts.is_empty()).then(|| query_parts.join(", "));
-    (name, query)
+    (
+        (!condition.name.is_empty()).then(|| condition.name.clone()),
+        (!condition.query.is_empty()).then(|| condition.query.clone()),
+    )
 }
 
 fn scope_rule_condition_text(rule: &crate::stylesheets::ScopeRule) -> String {
@@ -1748,11 +1773,9 @@ fn page_margin_longhand_name(name: &str) -> bool {
 }
 
 fn declaration_block_css_text(block: &PropertyDeclarationBlock) -> String {
-    let mut css_text = CssStringWriter::new();
-    block
-        .to_css(&mut css_text)
-        .expect("serializing a declaration block to string should not fail");
-    css_text.trim_end().to_owned()
+    crate::moli_declaration_block::declaration_block_style_resolution_text(block)
+        .trim_end()
+        .to_owned()
 }
 
 fn keyframe_rule_view(
@@ -1849,17 +1872,17 @@ mod tests {
     };
 
     use super::{
-        CssRuleInsertError, delete_keyframe_rule, delete_nested_rule, font_face_descriptor_names,
-        insert_keyframe_rule, insert_nested_rule, keyframe_rule_view_from_native,
-        keyframe_selector_texts_match, normalize_keyframe_selector_text,
-        normalize_page_selector_text, page_descriptor_names, parse_condition_rule_view,
-        parse_counter_style_rule_view, parse_font_face_cssom_descriptor_block,
-        parse_font_face_cssom_descriptor_entry, parse_font_face_rule_view,
-        parse_font_feature_values_rule_view, parse_import_rule_view, parse_keyframes_rule_view,
-        parse_layer_rule_view, parse_namespace_rule_view, parse_nested_rule_block_views,
-        parse_page_descriptor_entries, parse_page_margin_descriptor_block,
-        parse_page_margin_rule_view, parse_page_rule_view, parse_property_rule_view,
-        parse_stylesheet_rule_texts, parse_stylesheet_rule_tree,
+        CssContainerConditionView, CssRuleInsertError, delete_keyframe_rule, delete_nested_rule,
+        font_face_descriptor_names, insert_keyframe_rule, insert_nested_rule,
+        keyframe_rule_view_from_native, keyframe_selector_texts_match,
+        normalize_keyframe_selector_text, normalize_page_selector_text, page_descriptor_names,
+        parse_condition_rule_view, parse_counter_style_rule_view,
+        parse_font_face_cssom_descriptor_block, parse_font_face_cssom_descriptor_entry,
+        parse_font_face_rule_view, parse_font_feature_values_rule_view, parse_import_rule_view,
+        parse_keyframes_rule_view, parse_layer_rule_view, parse_namespace_rule_view,
+        parse_nested_rule_block_views, parse_page_descriptor_entries,
+        parse_page_margin_descriptor_block, parse_page_margin_rule_view, parse_page_rule_view,
+        parse_property_rule_view, parse_stylesheet_rule_texts, parse_stylesheet_rule_tree,
         parse_stylesheet_rule_view_for_insert, parse_stylesheet_rule_views,
         refresh_stylesheet_namespaces_after_cssom_mutation, stylesheet_contents,
         stylesheet_rule_tree_counter_style_rule_view, stylesheet_rule_tree_font_face_rule_view,
@@ -1976,6 +1999,26 @@ mod tests {
             Some("(width > 10px)")
         );
 
+        let multiple = parse_condition_rule_view(
+            r"@container escaped\,name style(--color: rgb(1,2,3)), (width > 10px) {}",
+        )
+        .expect("multiple conditions should parse");
+        assert_eq!(multiple.container_name, None);
+        assert_eq!(multiple.container_query, None);
+        assert_eq!(
+            multiple.container_conditions,
+            vec![
+                CssContainerConditionView {
+                    name: r"escaped\,name".into(),
+                    query: "style(--color: rgb(1,2,3))".into(),
+                },
+                CssContainerConditionView {
+                    name: String::new(),
+                    query: "(width > 10px)".into(),
+                },
+            ]
+        );
+
         let scope =
             parse_condition_rule_view("@scope (.a) to (> .b) {}").expect("scope rule should parse");
         assert_eq!(scope.rule_type, CssRuleType::Scope);
@@ -2013,9 +2056,19 @@ mod tests {
         }
         let inserted = parse_stylesheet_rule_view_for_insert(&[], &css, 0, false).unwrap();
         let nested = parse_nested_rule_block_views(
-            &[], &css, CssRuleType::Media, CssRuleType::Media.bit(), None, false,
-        ).unwrap();
-        for rules in [parse_stylesheet_rule_views(&css), vec![inserted], nested.rules] {
+            &[],
+            &css,
+            CssRuleType::Media,
+            CssRuleType::Media.bit(),
+            None,
+            false,
+        )
+        .unwrap();
+        for rules in [
+            parse_stylesheet_rule_views(&css),
+            vec![inserted],
+            nested.rules,
+        ] {
             let mut rule = &rules[0];
             for _ in 0..90 {
                 assert_eq!(rule.rule_type, CssRuleType::Scope);
