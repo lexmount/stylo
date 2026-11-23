@@ -201,7 +201,7 @@ fn derive_variant_fields_expr(
 
     let (first, attrs) = match iter.next() {
         Some(pair) => pair,
-        None => return quote! { Ok(()) },
+        None => return quote! { ::std::fmt::Result::Ok(()) },
     };
     if attrs.field_bound {
         let ty = &first.ast().ty;
@@ -243,7 +243,7 @@ fn derive_variant_fields_expr(
     quote! {{
         let mut writer = style_traits::values::SequenceWriter::new(dest, #separator);
         #expr
-        Ok(())
+        ::std::fmt::Result::Ok(())
     }}
 }
 
