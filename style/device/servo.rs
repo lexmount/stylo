@@ -109,6 +109,8 @@ pub(super) struct ExtraDeviceData {
     /// Additional user and emulation media feature preferences.
     #[ignore_malloc_size_of = "Pure stack type"]
     media_feature_preferences: ServoMediaFeaturePreferences,
+    /// Embedding-provided CSS preferred text scale for the current document.
+    preferred_text_scale: Option<f32>,
     /// An implementation of a trait which implements support for querying font metrics.
     #[ignore_malloc_size_of = "Owned by embedder"]
     font_metrics_provider: Box<dyn FontMetricsProvider>,
@@ -157,6 +159,7 @@ impl Device {
                 primary_pointer_capabilities,
                 all_pointer_capabilities,
                 media_feature_preferences: ServoMediaFeaturePreferences::default(),
+                preferred_text_scale: None,
                 font_metrics_provider,
             },
         }
@@ -334,6 +337,17 @@ impl Device {
     /// `Stylist::force_stylesheet_origins_dirty`.
     pub fn set_color_scheme(&mut self, new_color_scheme: PrefersColorScheme) {
         self.extra.prefers_color_scheme = new_color_scheme;
+    }
+
+    /// Set the value of `env(preferred-text-scale)` for this document.
+    ///
+    /// The embedder is responsible for invalidating computed styles after changing it.
+    pub fn set_preferred_text_scale(&mut self, scale: f32) {
+        self.extra.preferred_text_scale = (scale.is_finite() && scale > 0.0).then_some(scale);
+    }
+
+    pub(crate) fn preferred_text_scale(&self) -> Option<f32> {
+        self.extra.preferred_text_scale
     }
 
     /// Set the color schemes supported by the page.

@@ -206,6 +206,19 @@ impl CssEnvironment {
         device: &Device,
         url_data: &UrlExtraData,
     ) -> Option<VariableValue> {
+        #[cfg(feature = "servo")]
+        if AsRef::<str>::as_ref(name) == "preferred-text-scale" {
+            return device.preferred_text_scale().map(|scale| {
+                VariableValue::from_token(
+                    Token::Number {
+                        has_sign: false,
+                        value: scale,
+                        int_value: None,
+                    },
+                    url_data,
+                )
+            });
+        }
         #[cfg(feature = "gecko")]
         let is_link_parameter = name.as_slice().starts_with(&[b'-' as u16, b'-' as u16]);
         #[cfg(feature = "servo")]
