@@ -5,6 +5,7 @@
 //! Media-query device and expression representation.
 
 use crate::color::AbsoluteColor;
+use crate::computed_value_flags::ComputedValueFlags;
 use crate::custom_properties::CssEnvironment;
 #[cfg(feature = "servo")]
 use crate::derives::*;
@@ -90,6 +91,25 @@ pub struct Device {
     extra: ExtraDeviceData,
 }
 
+/// Whether the computed line-height may change independently of font size.
+pub(crate) fn line_height_likely_changed(
+    old_style: Option<&ComputedValues>,
+    new_style: &ComputedValues,
+) -> bool {
+    let Some(old_style) = old_style else {
+        return true;
+    };
+    let old_font = old_style.get_font();
+    let new_font = new_style.get_font();
+    let line_height = new_font.clone_line_height();
+    old_font.clone_line_height() != line_height
+        || (line_height.is_normal()
+            && (old_font.clone_font_family() != new_font.clone_font_family()
+                || old_font.clone_font_style() != new_font.clone_font_style()
+                || old_font.clone_font_weight() != new_font.clone_font_weight()
+                || old_font.clone_font_width() != new_font.clone_font_width()))
+}
+
 impl Device {
     /// Get the relevant environment to resolve `env()` functions.
     #[inline]
@@ -112,6 +132,68 @@ impl Device {
     /// calculation of root font-relative metrics.
     pub fn set_root_style(&self, style: &Arc<ComputedValues>) {
         *self.root_style.write() = style.clone();
+    }
+
+    /// Publish the document root's computed style and update the bases for root
+    /// font-relative units. Returns whether any of the resolved bases changed.
+    /// Call this only for the primary style being adopted by the document.
+    pub fn update_root_font_relative_state(&self, style: &Arc<ComputedValues>) -> bool {
+        debug_assert!(
+            style
+                .flags
+                .contains(ComputedValueFlags::IS_ROOT_ELEMENT_STYLE)
+        );
+        let previous = {
+            let mut root_style = self.root_style.write();
+            mem::replace(&mut *root_style, style.clone())
+        };
+
+        let font = style.get_font();
+        let zoom = style.effective_zoom;
+        let font_size = font.clone_font_size();
+        let size = font_size.computed_size();
+        let size_bits = zoom.unzoom(size.px()).to_bits();
+        let font_size_changed = self.root_font_size.swap(size_bits, Ordering::Relaxed) != size_bits;
+
+        // Resolving 'normal' can require locking and querying font metrics.
+        let line_height_changed = (!previous
+            .flags
+            .contains(ComputedValueFlags::IS_ROOT_ELEMENT_STYLE)
+            || previous.effective_zoom != zoom
+            || previous.writing_mode != style.writing_mode
+            || previous.get_font().clone_font_size() != font_size
+            || line_height_likely_changed(Some(&previous), style))
+            && {
+                let line_height = self.calc_line_height(font, style.writing_mode, None).0;
+                #[cfg(feature = "servo")]
+                let line_height = if font.clone_line_height().is_normal() {
+                    use crate::values::specified::font::{
+                        FONT_MEDIUM_LINE_HEIGHT_PX, FONT_MEDIUM_PX,
+                    };
+                    // Servo does not resolve 'normal' from font metrics yet.
+                    size * (FONT_MEDIUM_LINE_HEIGHT_PX / FONT_MEDIUM_PX)
+                } else {
+                    line_height
+                };
+                let line_height = zoom.unzoom(line_height.px()).to_bits();
+                self.root_line_height.swap(line_height, Ordering::Relaxed) != line_height
+            };
+
+        // Compute these metrics lazily until the document uses a unit that needs them.
+        let metrics_changed = self.used_root_font_metrics() && self.update_root_font_metrics();
+        font_size_changed || line_height_changed || metrics_changed
+    }
+
+    /// Seed a replacement Device with the last published root style for the
+    /// same document. The replacement computes font metrics on demand.
+    pub fn inherit_root_font_relative_state_from(&self, previous: &Self) {
+        let style = previous.root_style.read().clone();
+        if style
+            .flags
+            .contains(ComputedValueFlags::IS_ROOT_ELEMENT_STYLE)
+        {
+            self.update_root_font_relative_state(&style);
+        }
     }
 
     /// Get the font size of the root element (for rem)

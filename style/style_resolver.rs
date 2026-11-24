@@ -296,7 +296,16 @@ where
         layout_parent_style: Option<&ComputedValues>,
     ) -> ResolvedElementStyles {
         let primary_style = self.resolve_primary_style(parent_style, layout_parent_style);
+        self.resolve_style_with_primary(primary_style, layout_parent_style)
+    }
 
+    /// Resolve eager pseudo-elements using the already cascaded primary style.
+    /// Use the same element and layout parent as in primary style resolution.
+    pub fn resolve_style_with_primary(
+        &mut self,
+        primary_style: PrimaryStyle,
+        layout_parent_style: Option<&ComputedValues>,
+    ) -> ResolvedElementStyles {
         let mut pseudo_styles = EagerPseudoStyles::default();
 
         if self
