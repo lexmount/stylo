@@ -296,7 +296,20 @@ where
         layout_parent_style: Option<&ComputedValues>,
     ) -> ResolvedElementStyles {
         let primary_style = self.resolve_primary_style(parent_style, layout_parent_style);
+        let pseudos = self.resolve_eager_pseudos(&primary_style, layout_parent_style);
+        ResolvedElementStyles {
+            primary: primary_style,
+            pseudos,
+        }
+    }
 
+    /// Resolve this element's eager pseudo-elements from its already resolved
+    /// primary style and layout parent style.
+    pub fn resolve_eager_pseudos(
+        &mut self,
+        primary_style: &PrimaryStyle,
+        layout_parent_style: Option<&ComputedValues>,
+    ) -> EagerPseudoStyles {
         let mut pseudo_styles = EagerPseudoStyles::default();
 
         if self
@@ -305,11 +318,11 @@ where
             .is_none_or(|p| p.is_element_backed())
         {
             let layout_parent_style_for_pseudo =
-                layout_parent_style_for_pseudo(&primary_style, layout_parent_style);
+                layout_parent_style_for_pseudo(primary_style, layout_parent_style);
             SelectorImpl::each_eagerly_cascaded_pseudo_element(|pseudo| {
                 let pseudo_style = self.resolve_pseudo_style(
                     &pseudo,
-                    &primary_style,
+                    primary_style,
                     layout_parent_style_for_pseudo,
                 );
 
@@ -324,10 +337,7 @@ where
             })
         }
 
-        ResolvedElementStyles {
-            primary: primary_style,
-            pseudos: pseudo_styles,
-        }
+        pseudo_styles
     }
 
     /// Resolve an element's styles with the default inheritance parent/layout

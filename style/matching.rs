@@ -1037,34 +1037,7 @@ pub trait MatchMethods: TElement {
         // since last time, ensure that we recascade the entire tree.
         if is_root {
             debug_assert!(self.owner_doc_matches_for_testing(device));
-            device.set_root_style(new_primary_style);
-
-            // Update root font size for rem units
-            if font_size_changed {
-                let size = new_font_size.computed_size();
-                device.set_root_font_size(new_primary_style.effective_zoom.unzoom(size.px()));
-            }
-
-            // Update root line height for rlh units
-            if line_height_likely_changed {
-                let new_line_height = device
-                    .calc_line_height(
-                        new_primary_style.get_font(),
-                        new_primary_style.writing_mode,
-                        None,
-                    )
-                    .0;
-                device.set_root_line_height(
-                    new_primary_style
-                        .effective_zoom
-                        .unzoom(new_line_height.px()),
-                );
-            }
-
-            // Update root font metrics for rcap, rch, rex, ric units. Since querying
-            // font metrics can be an expensive call, they are only updated if these
-            // units are used in the document.
-            if device.used_root_font_metrics() && device.update_root_font_metrics() {
+            if device.update_root_style(new_primary_style, line_height_likely_changed) {
                 child_restyle_hint |= RestyleHint::RESTYLE_IF_AFFECTED_BY_WM_OR_ANCESTOR_FONT;
             }
         }

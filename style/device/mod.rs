@@ -114,6 +114,51 @@ impl Device {
         *self.root_style.write() = style.clone();
     }
 
+    /// Publish the document's computed root style and its font-relative bases.
+    /// Returns whether a root-relative unit can resolve to a different length.
+    pub fn update_root_style(
+        &self,
+        style: &Arc<ComputedValues>,
+        line_height_may_have_changed: bool,
+    ) -> bool {
+        self.set_root_style(style);
+        let font = style.get_font();
+        let zoom = style.effective_zoom;
+        let size = font.clone_font_size().computed_size();
+        let font_size = zoom.unzoom(size.px()).to_bits();
+        let font_size_changed = self.root_font_size.swap(font_size, Ordering::Relaxed) != font_size;
+
+        let line_height_changed = if font_size_changed || line_height_may_have_changed {
+            let line_height = self.calc_line_height(font, style.writing_mode, None).0;
+            #[cfg(feature = "servo")]
+            let line_height = if font.clone_line_height().is_normal() {
+                use crate::values::specified::font::{FONT_MEDIUM_LINE_HEIGHT_PX, FONT_MEDIUM_PX};
+                // Servo cannot query the normal line height yet. Scale the
+                // same fallback used when initializing the device.
+                size * (FONT_MEDIUM_LINE_HEIGHT_PX / FONT_MEDIUM_PX)
+            } else {
+                line_height
+            };
+            let line_height = zoom.unzoom(line_height.px()).to_bits();
+            self.root_line_height.swap(line_height, Ordering::Relaxed) != line_height
+        } else {
+            false
+        };
+
+        // These metrics are computed lazily until the first use of a root font
+        // metric unit.
+        let font_metrics_changed = self.used_root_font_metrics() && self.update_root_font_metrics();
+        font_size_changed || line_height_changed || font_metrics_changed
+    }
+
+    /// Restore the published root style when replacing a document's device.
+    pub fn copy_root_style_from(&self, previous: &Self) {
+        let style = previous.root_style.read().clone();
+        if !Arc::ptr_eq(&style, &previous.default_values) {
+            self.update_root_style(&style, true);
+        }
+    }
+
     /// Get the font size of the root element (for rem)
     pub fn root_font_size(&self) -> Length {
         self.used_root_font_size.store(true, Ordering::Relaxed);
