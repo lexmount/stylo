@@ -991,6 +991,7 @@ impl<E: TElement> StyleSharingCache<E> {
                 return Some(PrimaryStyle {
                     style: data.clone_style_with_flags(new_flags),
                     reused_via_rule_node: true,
+                    root_font_relative_state_changed: None,
                 });
             }
 

@@ -590,13 +590,15 @@ trait PrivateMatchMethods: TElement {
                     included_cascade_flags: RuleCascadeFlags::empty(),
                 };
 
-                new_resolved_styles.primary.style = StyleResolverForElement::new(
+                let mut resolver = StyleResolverForElement::new(
                     *self,
                     context,
                     RuleInclusion::All,
                     PseudoElementResolution::IfApplicable,
-                )
-                .cascade_style_and_visited_with_default_parents(inputs);
+                );
+                new_resolved_styles.primary.style =
+                    resolver.cascade_style_and_visited_with_default_parents(inputs);
+                resolver.update_root_after_animation(new_resolved_styles);
             }
         }
 
@@ -988,6 +990,8 @@ pub trait MatchMethods: TElement {
             important_rules_changed,
         );
 
+        let root_font_relative_state_changed = new_styles.primary.root_font_relative_state_changed;
+
         // First of all, update the styles.
         let old_styles = data.set_styles(new_styles);
 
@@ -1006,11 +1010,12 @@ pub trait MatchMethods: TElement {
         let old_font_size = old_style.map(|s| s.get_font().clone_font_size());
         let font_size_changed = old_font_size.is_none_or(|fs| fs != new_font_size);
 
-        // Update root font-relative units. If any of these unit values changed
-        // since last time, ensure that we recascade the entire tree.
+        // Preserve changes published by the resolver before cascading pseudos.
+        // A change in the bases still invalidates dependent descendants.
         let root_units_changed = if is_root {
             debug_assert!(self.owner_doc_matches_for_testing(device));
-            device.update_root_font_relative_state(new_primary_style)
+            root_font_relative_state_changed
+                .unwrap_or_else(|| device.update_root_font_relative_state(new_primary_style))
         } else {
             false
         };

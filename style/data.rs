@@ -501,6 +501,7 @@ impl ElementData {
         PrimaryStyle {
             style: ResolvedStyle(self.styles.primary().clone()),
             reused_via_rule_node,
+            root_font_relative_state_changed: None,
         }
     }
 

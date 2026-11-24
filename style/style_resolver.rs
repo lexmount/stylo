@@ -6,7 +6,7 @@
 
 use crate::applicable_declarations::ApplicableDeclarationList;
 use crate::computed_value_flags::ComputedValueFlags;
-use crate::context::{CascadeInputs, ElementCascadeInputs, StyleContext};
+use crate::context::{CascadeInputs, EagerPseudoCascadeInputs, ElementCascadeInputs, StyleContext};
 use crate::data::{EagerPseudoStyles, ElementStyles};
 use crate::dom::{TElement, TNode};
 use crate::matching::MatchMethods;
@@ -69,6 +69,9 @@ pub struct PrimaryStyle {
     /// Whether the style was reused from another element via the rule node (see
     /// `StyleSharingCache::lookup_by_rules`).
     pub reused_via_rule_node: bool,
+    /// Whether publishing this primary style changed the root-relative bases.
+    /// `None` means the resolver did not publish the style to the Device.
+    pub(crate) root_font_relative_state_changed: Option<bool>,
 }
 
 /// A set of style returned from the resolver machinery.
@@ -186,7 +189,8 @@ where
         }
     }
 
-    /// Resolve just the style of a given element.
+    /// Resolve just the style of a given element. In Servo, resolving the
+    /// document root with all rules also publishes its font-relative bases.
     pub fn resolve_primary_style(
         &mut self,
         parent_style: Option<&ComputedValues>,
@@ -278,15 +282,38 @@ where
 
         // No style to reuse. Cascade the style, starting with visited style
         // if necessary.
+        let style = self.cascade_style_and_visited(
+            inputs,
+            parent_style,
+            layout_parent_style,
+            /* pseudo = */ None,
+        );
+        let root_font_relative_state_changed = self.publish_root_font_relative_state(&style.0);
         PrimaryStyle {
-            style: self.cascade_style_and_visited(
-                inputs,
-                parent_style,
-                layout_parent_style,
-                /* pseudo = */ None,
-            ),
+            style,
             reused_via_rule_node: false,
+            root_font_relative_state_changed,
         }
+    }
+
+    fn publish_root_font_relative_state(&mut self, style: &Arc<ComputedValues>) -> Option<bool> {
+        if !cfg!(feature = "servo")
+            || self.rule_inclusion != RuleInclusion::All
+            || !style
+                .flags
+                .contains(ComputedValueFlags::IS_ROOT_ELEMENT_STYLE)
+        {
+            return None;
+        }
+
+        let device = self.context.shared.stylist.device();
+        debug_assert!(self.element.owner_doc_matches_for_testing(device));
+        let changed = device.update_root_font_relative_state(style);
+        if changed {
+            // The rule cache does not key entries by the root's font-relative bases.
+            self.context.thread_local.rule_cache = Default::default();
+        }
+        Some(changed)
     }
 
     /// Resolve the style of a given element, and all its eager pseudo-elements.
@@ -295,17 +322,16 @@ where
         parent_style: Option<&ComputedValues>,
         layout_parent_style: Option<&ComputedValues>,
     ) -> ResolvedElementStyles {
-        let primary_style = self.resolve_primary_style(parent_style, layout_parent_style);
-        self.resolve_style_with_primary(primary_style, layout_parent_style)
+        let primary = self.resolve_primary_style(parent_style, layout_parent_style);
+        let pseudos = self.resolve_eager_pseudo_styles(&primary, layout_parent_style);
+        ResolvedElementStyles { primary, pseudos }
     }
 
-    /// Resolve eager pseudo-elements using the already cascaded primary style.
-    /// Use the same element and layout parent as in primary style resolution.
-    pub fn resolve_style_with_primary(
+    fn resolve_eager_pseudo_styles(
         &mut self,
-        primary_style: PrimaryStyle,
+        primary_style: &PrimaryStyle,
         layout_parent_style: Option<&ComputedValues>,
-    ) -> ResolvedElementStyles {
+    ) -> EagerPseudoStyles {
         let mut pseudo_styles = EagerPseudoStyles::default();
 
         if self
@@ -314,11 +340,11 @@ where
             .is_none_or(|p| p.is_element_backed())
         {
             let layout_parent_style_for_pseudo =
-                layout_parent_style_for_pseudo(&primary_style, layout_parent_style);
+                layout_parent_style_for_pseudo(primary_style, layout_parent_style);
             SelectorImpl::each_eagerly_cascaded_pseudo_element(|pseudo| {
                 let pseudo_style = self.resolve_pseudo_style(
                     &pseudo,
-                    &primary_style,
+                    primary_style,
                     layout_parent_style_for_pseudo,
                 );
 
@@ -333,10 +359,7 @@ where
             })
         }
 
-        ResolvedElementStyles {
-            primary: primary_style,
-            pseudos: pseudo_styles,
-        }
+        pseudo_styles
     }
 
     /// Resolve an element's styles with the default inheritance parent/layout
@@ -423,45 +446,66 @@ where
         inputs: ElementCascadeInputs,
     ) -> ResolvedElementStyles {
         with_default_parent_styles(self.element, move |parent_style, layout_parent_style| {
-            let primary_style =
+            let primary =
                 self.cascade_primary_style(inputs.primary, parent_style, layout_parent_style);
+            let pseudos =
+                self.cascade_eager_pseudo_styles(inputs.pseudos, &primary, layout_parent_style);
+            ResolvedElementStyles { primary, pseudos }
+        })
+    }
 
-            let mut pseudo_styles = EagerPseudoStyles::default();
-            if let Some(mut pseudo_array) = inputs.pseudos.into_array() {
-                let layout_parent_style_for_pseudo = if primary_style.style().is_display_contents()
-                {
-                    layout_parent_style
-                } else {
-                    Some(primary_style.style())
-                };
+    fn cascade_eager_pseudo_styles(
+        &mut self,
+        inputs: EagerPseudoCascadeInputs,
+        primary_style: &PrimaryStyle,
+        layout_parent_style: Option<&ComputedValues>,
+    ) -> EagerPseudoStyles {
+        let mut pseudo_styles = EagerPseudoStyles::default();
+        if let Some(pseudo_array) = inputs.into_array() {
+            let layout_parent_style_for_pseudo =
+                layout_parent_style_for_pseudo(primary_style, layout_parent_style);
 
-                for (i, inputs) in pseudo_array.iter_mut().enumerate() {
-                    if let Some(inputs) = inputs.take() {
-                        let pseudo = PseudoElement::from_eager_index(i);
+            for (i, inputs) in pseudo_array.into_iter().enumerate() {
+                if let Some(inputs) = inputs {
+                    let pseudo = PseudoElement::from_eager_index(i);
 
-                        let style = self.cascade_style_and_visited(
-                            inputs,
-                            Some(primary_style.style()),
-                            layout_parent_style_for_pseudo,
-                            Some(&pseudo),
-                        );
+                    let style = self.cascade_style_and_visited(
+                        inputs,
+                        Some(primary_style.style()),
+                        layout_parent_style_for_pseudo,
+                        Some(&pseudo),
+                    );
 
-                        if !matches!(self.pseudo_resolution, PseudoElementResolution::Force)
-                            && eager_pseudo_is_definitely_not_generated(&pseudo, &style.0)
-                        {
-                            continue;
-                        }
-
-                        pseudo_styles.set(&pseudo, style.0);
+                    if !matches!(self.pseudo_resolution, PseudoElementResolution::Force)
+                        && eager_pseudo_is_definitely_not_generated(&pseudo, &style.0)
+                    {
+                        continue;
                     }
+
+                    pseudo_styles.set(&pseudo, style.0);
                 }
             }
+        }
+        pseudo_styles
+    }
 
-            ResolvedElementStyles {
-                primary: primary_style,
-                pseudos: pseudo_styles,
+    /// An animation can replace the root primary after the initial cascade.
+    /// Keep its pseudos consistent with the final font-relative bases.
+    #[cfg(feature = "servo")]
+    pub(crate) fn update_root_after_animation(&mut self, styles: &mut ResolvedElementStyles) {
+        if let Some(changed) = self.publish_root_font_relative_state(styles.primary_style()) {
+            *styles
+                .primary
+                .root_font_relative_state_changed
+                .get_or_insert(false) |= changed;
+            if changed {
+                styles.pseudos = self.cascade_eager_pseudo_styles(
+                    EagerPseudoCascadeInputs::new_from_style(&styles.pseudos),
+                    &styles.primary,
+                    None,
+                );
             }
-        })
+        }
     }
 
     fn resolve_pseudo_style(
