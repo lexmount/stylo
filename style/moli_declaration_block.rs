@@ -1,6 +1,7 @@
 //! Moli-facing CSS declaration block hooks.
 
 use std::borrow::Cow;
+use std::fmt::Write;
 
 use cssparser::Parser;
 use style_traits::{CssString, ParsingMode};
@@ -11,7 +12,8 @@ use crate::{
     parser::ParserContext,
     properties::{
         AllShorthand, Importance, PropertyDeclaration, PropertyDeclarationBlock,
-        PropertyDeclarationId, PropertyId, SourcePropertyDeclaration, parse_one_declaration_into,
+        PropertyDeclarationId, PropertyId, ShorthandId, SourcePropertyDeclaration,
+        SourcePropertyDeclarationUpdate, SubpropertiesVec, append_declaration_value,
         parse_property_declaration_list,
     },
     stylesheets::{CssRuleType, Namespaces, Origin, UrlExtraData},
@@ -43,7 +45,6 @@ pub struct CssMutationProjection {
     pub set_result: CssSetResult,
     pub entries: Vec<CssDeclarationEntry>,
     pub affected_names: Vec<String>,
-    pub stored_names: Vec<String>,
     pub has_unresolved_value: bool,
 }
 
@@ -66,14 +67,12 @@ impl CssDeclarationBlock {
     }
 
     pub fn css_text(&self) -> String {
-        let mut output = CssString::new();
-        self.block.to_css(&mut output).ok();
-        output
+        declaration_block_css_text(&self.block)
     }
 
     pub fn item(&self, index: usize) -> Option<String> {
         let (declaration, _) = self.block.declaration_importance_iter().nth(index)?;
-        Some(property_declaration_name(declaration.id()))
+        Some(property_declaration_name(declaration.id()).into_owned())
     }
 
     pub fn entries(&self) -> Vec<CssDeclarationEntry> {
@@ -85,7 +84,7 @@ impl CssDeclarationBlock {
 
     pub fn property_value(&self, name: &str) -> Option<String> {
         let property = PropertyId::parse_enabled_for_all_content(name).ok()?;
-        Some(self.property_value_by_id(&property))
+        Some(property_value_by_id(&self.block, &property))
     }
 
     pub fn property_priority(&self, name: &str) -> bool {
@@ -118,57 +117,12 @@ impl CssDeclarationBlock {
         value: &str,
         priority: bool,
     ) -> CssMutationProjection {
-        let Some(property) = parse_style_context_property_id(name) else {
-            return CssMutationProjection::parse_error();
-        };
-        let affected_names = affected_names_for_property_id(&property);
-
-        if value.is_empty() {
-            let result = self.remove_property_by_id(&property);
-            return CssMutationProjection {
-                set_result: if result.changed {
-                    CssSetResult::ChangedPropertySet
-                } else {
-                    CssSetResult::Unchanged
-                },
-                entries: Vec::new(),
-                affected_names,
-                stored_names: Vec::new(),
-                has_unresolved_value: false,
-            };
-        }
-
-        let Some(mut parsed) = ParsedCssPropertyMutation::parse_property(property, value, priority)
-        else {
-            return CssMutationProjection::parse_error();
-        };
-        let before_css_text = self.css_text();
-        let modified_existing = self
-            .block
-            .first_declaration_to_remove(&parsed.property)
-            .is_some();
-        self.remove_property_by_id(&parsed.property);
-        self.block
-            .extend(parsed.declarations.drain(), parsed.importance);
-        let after_css_text = self.css_text();
-        let set_result = if after_css_text == before_css_text {
-            CssSetResult::Unchanged
-        } else if modified_existing {
-            CssSetResult::ModifiedExisting
-        } else {
-            CssSetResult::ChangedPropertySet
-        };
-
-        CssMutationProjection {
-            set_result,
-            affected_names,
-            stored_names: parsed
-                .entries
-                .iter()
-                .map(|entry| entry.name.clone())
-                .collect(),
-            has_unresolved_value: parsed.has_unresolved_value,
-            entries: parsed.entries,
+        let parsed = with_detached_style_context(|context| {
+            ParsedCssomProperty::parse(name, value, priority, context)
+        });
+        match parsed {
+            Some(property) => property.replace_with_projection(&mut self.block),
+            None => CssMutationProjection::parse_error(),
         }
     }
 
@@ -183,17 +137,11 @@ impl CssDeclarationBlock {
         self.block
     }
 
-    fn property_value_by_id(&self, property: &PropertyId) -> String {
-        let mut output = CssString::new();
-        self.block.property_value_to_css(property, &mut output).ok();
-        output
-    }
-
     fn remove_property_by_id(&mut self, property: &PropertyId) -> CssRemoveResult {
         let Some(first_declaration) = self.block.first_declaration_to_remove(property) else {
             return CssRemoveResult::default();
         };
-        let old_value = self.property_value_by_id(property);
+        let old_value = property_value_by_id(&self.block, property);
         self.block.remove_property(property, first_declaration);
         CssRemoveResult {
             changed: true,
@@ -203,74 +151,306 @@ impl CssDeclarationBlock {
 }
 
 impl CssMutationProjection {
-    fn parse_error() -> Self {
+    /// An invalid property name or value.
+    pub fn parse_error() -> Self {
         Self {
             set_result: CssSetResult::ParseError,
             entries: Vec::new(),
             affected_names: Vec::new(),
-            stored_names: Vec::new(),
+            has_unresolved_value: false,
+        }
+    }
+
+    /// The projection of a CSSOM property removal.
+    pub fn removal(affected_names: Vec<String>, changed: bool) -> Self {
+        Self {
+            set_result: if changed {
+                CssSetResult::ChangedPropertySet
+            } else {
+                CssSetResult::Unchanged
+            },
+            entries: Vec::new(),
+            affected_names,
             has_unresolved_value: false,
         }
     }
 }
 
-struct ParsedCssPropertyMutation {
+/// A property parsed once in its style rule context, including any expanded
+/// longhands. An empty value represents a CSSOM removal.
+pub struct ParsedCssomProperty {
     property: PropertyId,
     importance: Importance,
     declarations: SourcePropertyDeclaration,
-    entries: Vec<CssDeclarationEntry>,
-    has_unresolved_value: bool,
 }
 
-impl ParsedCssPropertyMutation {
-    fn parse_property(property: PropertyId, value: &str, priority: bool) -> Option<Self> {
-        let importance = if priority {
-            Importance::Important
-        } else {
-            Importance::Normal
-        };
+impl ParsedCssomProperty {
+    /// Parse a CSSOM value with importance supplied separately.
+    pub fn parse(
+        name: &str,
+        value: &str,
+        important: bool,
+        context: &ParserContext<'_>,
+    ) -> Option<Self> {
+        let property = PropertyId::parse(name, context).ok()?;
         let mut declarations = SourcePropertyDeclaration::default();
-        with_declaration_context(|context| {
-            parse_one_declaration_into(
-                &mut declarations,
-                property.clone(),
-                value,
-                Origin::Author,
-                context.url_data,
-                None,
-                ParsingMode::DEFAULT,
-                QuirksMode::NoQuirks,
-                CssRuleType::Style,
-            )
-            .ok()
-        })??;
-        let entries = source_declaration_entries(&declarations, importance)?;
-        let has_unresolved_value = source_declaration_has_unresolved_value(&declarations);
+        if !value.is_empty() {
+            Parser::new(value)
+                .parse_entirely(|input| {
+                    PropertyDeclaration::parse_into(
+                        &mut declarations,
+                        property.clone(),
+                        context,
+                        input,
+                    )
+                })
+                .ok()?;
+        }
         Some(Self {
             property,
-            importance,
+            importance: if important {
+                Importance::Important
+            } else {
+                Importance::Normal
+            },
             declarations,
-            entries,
-            has_unresolved_value,
         })
+    }
+
+    /// The parsed property ID, before shorthand expansion.
+    pub fn property(&self) -> &PropertyId {
+        &self.property
+    }
+
+    /// The property names affected by this mutation, including shorthand resets.
+    pub fn affected_names(&self) -> Vec<String> {
+        affected_names_for_property_id(&self.property)
+    }
+
+    /// Whether the write removes the property.
+    pub fn is_removal(&self) -> bool {
+        self.declarations.is_empty()
+    }
+
+    /// Whether the parsed value depends on variable substitution.
+    pub fn has_unresolved_value(&self) -> bool {
+        matches!(
+            self.declarations.all_shorthand,
+            AllShorthand::WithVariables(_)
+        ) || self
+            .declarations
+            .declarations
+            .iter()
+            .any(|declaration| matches!(declaration, PropertyDeclaration::WithVariables(_)))
+    }
+
+    /// Whether the value expands to ordinary declarations ready to apply.
+    pub fn is_ordinary_declaration_list(&self) -> bool {
+        !self.declarations.declarations.is_empty() && !self.has_unresolved_value()
+    }
+
+    /// Whether the value has just one expanded declaration.
+    pub fn is_single_declaration(&self) -> bool {
+        self.declarations.declarations.len() == 1
+    }
+
+    /// Whether the given name occurs in the emitted entries with that spelling.
+    pub fn contains_entry_name(&self, name: &str) -> bool {
+        if !matches!(self.declarations.all_shorthand, AllShorthand::NotSet) {
+            return name == "all";
+        }
+        self.declarations
+            .declarations
+            .iter()
+            .any(|declaration| property_declaration_name(declaration.id()) == name)
+    }
+
+    /// Project the declarations as specified values for CSSOM.
+    pub fn entries(&self) -> Option<Vec<CssDeclarationEntry>> {
+        if !matches!(self.declarations.all_shorthand, AllShorthand::NotSet) {
+            let value = self.value()?;
+            return (!value.is_empty()).then(|| {
+                vec![CssDeclarationEntry {
+                    name: "all".to_owned(),
+                    value,
+                    priority: self.importance.important(),
+                }]
+            });
+        }
+        self.declarations
+            .declarations
+            .iter()
+            .map(|declaration| declaration_entry(declaration, self.importance))
+            .collect()
+    }
+
+    /// Serialize the parsed property value with Stylo's CSSOM serializers.
+    pub fn value(&self) -> Option<String> {
+        if self.is_removal() {
+            return None;
+        }
+        let mut value = CssString::new();
+        match self.property.as_shorthand() {
+            Ok(ShorthandId::All) => {
+                let css = match &self.declarations.all_shorthand {
+                    AllShorthand::CSSWideKeyword(keyword) => keyword.to_str(),
+                    AllShorthand::WithVariables(value) => &value.variable_value.css,
+                    AllShorthand::NotSet => return None,
+                };
+                value.write_str(css).ok()?;
+            },
+            Ok(shorthand) => {
+                // Use the CSSOM shorthand's enabled longhands in the same order
+                // as PropertyDeclarationBlock::shorthand_to_css.
+                let declarations = shorthand
+                    .longhands()
+                    .map(|id| self.find_declaration(PropertyDeclarationId::Longhand(id)))
+                    .collect::<Option<SubpropertiesVec<_>>>();
+                if let Some(appendable) = declarations
+                    .as_ref()
+                    .and_then(|declarations| shorthand.get_shorthand_appendable_value(declarations))
+                {
+                    append_declaration_value(&mut value, appendable).ok()?;
+                }
+            },
+            Err(id) => self.find_declaration(id)?.to_css(&mut value).ok()?,
+        }
+        Some(value)
+    }
+
+    fn find_declaration(&self, id: PropertyDeclarationId<'_>) -> Option<&PropertyDeclaration> {
+        self.declarations
+            .declarations
+            .iter()
+            .find(|declaration| declaration.id() == id)
+    }
+
+    /// Append a declaration-list item, respecting existing declaration importance.
+    pub fn append_to_declaration_list(mut self, target: &mut PropertyDeclarationBlock) {
+        target.extend(self.declarations.drain(), self.importance);
+    }
+
+    /// Prepare an ordered update against the current block.
+    pub fn prepare_for_update(
+        &self,
+        target: &PropertyDeclarationBlock,
+        updates: &mut SourcePropertyDeclarationUpdate,
+    ) -> bool {
+        target.prepare_for_update(&self.declarations, self.importance, updates)
+    }
+
+    /// Apply an update prepared against the same declarations and block.
+    pub fn apply_update(
+        mut self,
+        target: &mut PropertyDeclarationBlock,
+        updates: &mut SourcePropertyDeclarationUpdate,
+    ) {
+        target.update(self.declarations.drain(), self.importance, updates);
+    }
+
+    /// Compare a single declaration's specified spelling after Stylo found
+    /// typed equality. Values such as URLs can have equal typed values with
+    /// different spellings.
+    pub fn has_same_specified_value(&self, target: &PropertyDeclarationBlock) -> bool {
+        let Some(incoming) = self.declarations.declarations.first() else {
+            return false;
+        };
+        target
+            .get(incoming.id())
+            .is_some_and(|(existing, _)| specified_text(existing) == specified_text(incoming))
+    }
+
+    /// Replace only the expanded declarations for a CSSOM property write.
+    pub fn replace_expanded_declarations(self, target: &mut PropertyDeclarationBlock) {
+        if self.is_removal() || !matches!(self.declarations.all_shorthand, AllShorthand::NotSet) {
+            remove_property(target, &self.property);
+        } else {
+            for declaration in &self.declarations.declarations {
+                let property = match declaration.id() {
+                    PropertyDeclarationId::Longhand(id) => PropertyId::NonCustom(id.into()),
+                    PropertyDeclarationId::Custom(name) => PropertyId::Custom(name.clone()),
+                };
+                remove_property(target, &property);
+            }
+        }
+        self.append_to_declaration_list(target);
+    }
+
+    /// Replace the property as a whole and project the resulting CSSOM change.
+    pub fn replace_with_projection(
+        self,
+        target: &mut PropertyDeclarationBlock,
+    ) -> CssMutationProjection {
+        let affected_names = self.affected_names();
+        if self.is_removal() {
+            let changed = remove_property(target, &self.property);
+            return CssMutationProjection::removal(affected_names, changed);
+        }
+        let Some(entries) = self.entries() else {
+            return CssMutationProjection::parse_error();
+        };
+        let has_unresolved_value = self.has_unresolved_value();
+        let before = declaration_block_css_text(target);
+        let modified_existing = remove_property(target, &self.property);
+        self.append_to_declaration_list(target);
+
+        let set_result = if declaration_block_css_text(target) == before {
+            CssSetResult::Unchanged
+        } else if modified_existing {
+            CssSetResult::ModifiedExisting
+        } else {
+            CssSetResult::ChangedPropertySet
+        };
+        CssMutationProjection {
+            set_result,
+            entries,
+            affected_names,
+            has_unresolved_value,
+        }
     }
 }
 
-fn affected_names_for_property_id(property: &PropertyId) -> Vec<String> {
-    let name = property_name(property);
-    let mut names = match property.as_shorthand() {
-        Ok(shorthand) => {
-            let mut names = vec![name.clone()];
-            names.extend(
-                shorthand
-                    .longhands()
-                    .map(|longhand| moli_property_name(longhand.name()).to_owned()),
-            );
-            names
-        },
-        Err(id) => vec![moli_property_name(&id.name()).to_owned()],
+fn remove_property(block: &mut PropertyDeclarationBlock, property: &PropertyId) -> bool {
+    let Some(index) = block.first_declaration_to_remove(property) else {
+        return false;
     };
-    append_moli_cssom_affected_names(&name, &mut names);
+    block.remove_property(property, index);
+    true
+}
+
+fn specified_text(declaration: &PropertyDeclaration) -> String {
+    let mut text = CssString::new();
+    let _ = declaration.to_css(&mut text);
+    text
+}
+
+/// Serialize a borrowed declaration block.
+pub fn declaration_block_css_text(block: &PropertyDeclarationBlock) -> String {
+    let mut output = CssString::new();
+    let _ = block.to_css(&mut output);
+    output
+}
+
+/// Serialize a value from a borrowed declaration block.
+pub fn property_value_by_id(block: &PropertyDeclarationBlock, property: &PropertyId) -> String {
+    let mut output = CssString::new();
+    let _ = block.property_value_to_css(property, &mut output);
+    output
+}
+
+fn affected_names_for_property_id(property: &PropertyId) -> Vec<String> {
+    let shorthand = match property.as_shorthand() {
+        Ok(shorthand) => shorthand,
+        Err(id) => return vec![property_declaration_name(id).into_owned()],
+    };
+    let name = shorthand.name();
+    let mut names = vec![name.to_owned()];
+    names.extend(
+        shorthand
+            .longhands()
+            .map(|id| moli_property_name(id.name()).to_owned()),
+    );
+    append_moli_cssom_affected_names(name, &mut names);
     names
 }
 
@@ -292,19 +472,12 @@ fn append_unique_name(names: &mut Vec<String>, name: &str) {
     }
 }
 
-fn parse_style_context_property_id(name: &str) -> Option<PropertyId> {
-    with_declaration_context(|context| PropertyId::parse(name, context).ok()).flatten()
-}
-
-fn property_name(property: &PropertyId) -> String {
-    match property.as_shorthand() {
-        Ok(shorthand) => shorthand.name().to_owned(),
-        Err(id) => moli_property_name(&id.name()).to_owned(),
+/// Map a declaration ID to its exposed CSSOM spelling.
+pub fn property_declaration_name(property: PropertyDeclarationId<'_>) -> Cow<'static, str> {
+    match property.name() {
+        Cow::Borrowed(name) => Cow::Borrowed(moli_property_name(name)),
+        name => name,
     }
-}
-
-fn property_declaration_name(property: PropertyDeclarationId<'_>) -> String {
-    moli_property_name(&property.name()).to_owned()
 }
 
 fn moli_property_name(name: &str) -> &str {
@@ -314,19 +487,12 @@ fn moli_property_name(name: &str) -> &str {
     }
 }
 
-fn source_declaration_has_unresolved_value(declarations: &SourcePropertyDeclaration) -> bool {
-    matches!(declarations.all_shorthand, AllShorthand::WithVariables(_))
-        || declarations
-            .declarations
-            .iter()
-            .any(|declaration| matches!(declaration, PropertyDeclaration::WithVariables(_)))
-}
-
-fn declaration_entry(
+/// Serialize a single declaration to a CSSOM entry.
+pub fn declaration_entry(
     declaration: &PropertyDeclaration,
     importance: Importance,
 ) -> Option<CssDeclarationEntry> {
-    let name = property_declaration_name(declaration.id());
+    let name = property_declaration_name(declaration.id()).into_owned();
     let mut value = CssString::new();
     declaration.to_css(&mut value).ok()?;
     Some(CssDeclarationEntry {
@@ -336,65 +502,119 @@ fn declaration_entry(
     })
 }
 
-fn source_declaration_entries(
-    declarations: &SourcePropertyDeclaration,
-    importance: Importance,
-) -> Option<Vec<CssDeclarationEntry>> {
-    if !matches!(declarations.all_shorthand, AllShorthand::NotSet) {
-        let mut block = PropertyDeclarationBlock::new();
-        for declaration in declarations.all_shorthand.declarations() {
-            block.push(declaration, importance);
-        }
-        let mut value = CssString::new();
-        block
-            .property_value_to_css(
-                &PropertyId::parse_enabled_for_all_content("all").ok()?,
-                &mut value,
-            )
-            .ok()?;
-        return (!value.is_empty()).then(|| {
-            vec![CssDeclarationEntry {
-                name: "all".to_owned(),
-                value,
-                priority: importance.important(),
-            }]
-        });
-    }
-    declarations
-        .declarations
-        .iter()
-        .map(|declaration| declaration_entry(declaration, importance))
-        .collect()
-}
-
 pub fn parse_declaration_block(css_text: &str) -> CssDeclarationBlock {
-    with_declaration_context(|context| {
-        let input = css_text;
-        let mut parser = Parser::new(input);
-        CssDeclarationBlock::new(parse_property_declaration_list(context, &mut parser, &[]))
-    })
-    .unwrap_or_default()
+    CssDeclarationBlock::new(parse_declarations(css_text))
 }
 
-fn with_declaration_context<R>(f: impl FnOnce(&ParserContext) -> R) -> Option<R> {
-    let url_data = UrlExtraData::from(url::Url::parse("about:blank").ok()?);
-    let context = ParserContext::new(
+/// Parse standalone style declarations into the native block.
+pub fn parse_declarations(css_text: &str) -> PropertyDeclarationBlock {
+    with_detached_style_context(|context| {
+        parse_property_declaration_list(context, &mut Parser::new(css_text), &[])
+    })
+}
+
+/// Construct the parser context for a CSSOM style rule.
+pub fn style_context(url_data: &UrlExtraData, quirks_mode: QuirksMode) -> ParserContext<'_> {
+    ParserContext::new(
         Origin::Author,
-        &url_data,
+        url_data,
         Some(CssRuleType::Style),
         ParsingMode::DEFAULT,
-        QuirksMode::NoQuirks,
+        quirks_mode,
         Cow::Owned(Namespaces::default()),
         None,
         None,
         AttrTaint::default(),
-    );
-    Some(f(&context))
+    )
+}
+
+/// Run a standalone declaration parse in standards mode.
+pub fn with_detached_style_context<T>(f: impl FnOnce(&ParserContext<'_>) -> T) -> T {
+    let url_data = UrlExtraData::from(url::Url::parse("about:blank").unwrap());
+    f(&style_context(&url_data, QuirksMode::NoQuirks))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CssDeclarationBlock, CssDeclarationEntry, CssSetResult, parse_declaration_block};
+    use super::{
+        CssDeclarationBlock, CssDeclarationEntry, CssSetResult, ParsedCssomProperty,
+        parse_declaration_block, property_value_by_id, with_detached_style_context,
+    };
+    use crate::properties::PropertyDeclarationBlock;
+
+    #[test]
+    fn parsed_values_match_declaration_block_serialization() {
+        with_detached_style_context(|context| {
+            for (name, value) in [
+                ("width", "var(--width, 2px)"),
+                ("padding", "1px 2px 3px 4px"),
+                ("margin", "var(--margin, 1px 2px)"),
+                ("border", "1px solid red"),
+                ("background", "red url(./image.png) no-repeat"),
+                ("-webkit-border-radius", "1px 2px / 3px 4px"),
+                ("-webkit-background-clip", "border-box"),
+                ("--Token", "var(--Other) /* preserved */"),
+                ("--empty", " "),
+            ] {
+                for important in [false, true] {
+                    let parsed = ParsedCssomProperty::parse(name, value, important, context)
+                        .unwrap_or_else(|| panic!("failed to parse {name}: {value}"));
+                    let property = parsed.property().clone();
+                    let actual = parsed.value();
+                    let mut block = PropertyDeclarationBlock::new();
+                    parsed.append_to_declaration_list(&mut block);
+                    let expected = property_value_by_id(&block, &property);
+                    assert_eq!(
+                        actual.as_deref(),
+                        Some(expected.as_str()),
+                        "{name}: {value}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn parsed_all_serializes_its_compact_value() {
+        with_detached_style_context(|context| {
+            // Expanding all into a block and reading it back runs two passes
+            // over enabled longhands. Other unit tests can enable preferences
+            // between those passes. Its own specified value is independent of
+            // which longhands are currently enabled.
+            for (value, unresolved) in [("inherit", false), ("var(--shared, revert-layer)", true)] {
+                for priority in [false, true] {
+                    let parsed =
+                        ParsedCssomProperty::parse("all", value, priority, context).unwrap();
+                    assert_eq!(parsed.value().as_deref(), Some(value));
+                    assert_eq!(parsed.has_unresolved_value(), unresolved);
+                    assert_eq!(
+                        parsed.entries().unwrap(),
+                        [CssDeclarationEntry {
+                            name: "all".to_owned(),
+                            value: value.to_owned(),
+                            priority,
+                        }],
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn parsed_property_names_use_the_resolved_property_and_preserve_custom_case() {
+        with_detached_style_context(|context| {
+            for (name, value, expected) in [
+                ("-webkit-background-clip", "border-box", "background-clip"),
+                ("font-stretch", "condensed", "font-stretch"),
+                ("--Token", "value", "--Token"),
+            ] {
+                let parsed = ParsedCssomProperty::parse(name, value, false, context).unwrap();
+                assert_eq!(parsed.affected_names(), [expected]);
+                assert!(parsed.contains_entry_name(expected));
+                assert!(!parsed.contains_entry_name(&expected.to_ascii_uppercase()));
+            }
+        });
+    }
 
     fn set_projection_entries(
         block: &mut CssDeclarationBlock,
@@ -438,7 +658,11 @@ mod tests {
             "calc(1px * exp(tan(atan2(50%, 1px))))",
         ] {
             let mut block = CssDeclarationBlock::default();
-            assert_eq!(block.set_property("width", value, false), CssSetResult::ParseError, "{value}");
+            assert_eq!(
+                block.set_property("width", value, false),
+                CssSetResult::ParseError,
+                "{value}"
+            );
         }
         for value in [
             "calc(1px * pow(tan(atan2(1px, 1px)), 1))",
@@ -447,7 +671,11 @@ mod tests {
             "calc(1px * sign(50%))",
         ] {
             let mut block = CssDeclarationBlock::default();
-            assert_ne!(block.set_property("width", value, false), CssSetResult::ParseError, "{value}");
+            assert_ne!(
+                block.set_property("width", value, false),
+                CssSetResult::ParseError,
+                "{value}"
+            );
         }
     }
 
@@ -988,7 +1216,7 @@ mod tests {
         assert_eq!(projection.entries.len(), 1);
         assert_eq!(projection.entries[0].name, "background-clip");
         assert_eq!(projection.entries[0].value, "text");
-        assert_eq!(projection.stored_names, ["background-clip"]);
+        assert_eq!(projection.entries[0].name, "background-clip");
         assert_eq!(
             block.property_value("background-clip").as_deref(),
             Some("text")
@@ -1341,7 +1569,7 @@ mod tests {
         let projection = block.set_property_with_projection("--token", "var(--gap, 1px)", true);
         assert_eq!(projection.set_result, CssSetResult::ModifiedExisting);
         assert_eq!(projection.affected_names, ["--token"]);
-        assert_eq!(projection.stored_names, ["--token"]);
+        assert_eq!(projection.entries[0].name, "--token");
         assert!(!projection.has_unresolved_value);
         assert_eq!(
             block.property_value("--token").as_deref(),
