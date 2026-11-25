@@ -274,19 +274,12 @@ pub enum MozTheme {
 pub enum PointerEvents {
     Auto,
     None,
-    #[cfg(feature = "gecko")]
     Visiblepainted,
-    #[cfg(feature = "gecko")]
     Visiblefill,
-    #[cfg(feature = "gecko")]
     Visiblestroke,
-    #[cfg(feature = "gecko")]
     Visible,
-    #[cfg(feature = "gecko")]
     Painted,
-    #[cfg(feature = "gecko")]
     Fill,
-    #[cfg(feature = "gecko")]
     Stroke,
     All,
 }

@@ -408,9 +408,26 @@ mod tests {
     }
 
     #[test]
-    fn declaration_block_accepts_pointer_events_all() {
-        let block = parse_declaration_block("pointer-events: all");
-        assert_eq!(block.property_value("pointer-events").as_deref(), Some("all"));
+    fn declaration_block_accepts_pointer_events_keywords() {
+        for keyword in [
+            "auto",
+            "none",
+            "visiblePainted",
+            "visibleFill",
+            "visibleStroke",
+            "visible",
+            "painted",
+            "fill",
+            "stroke",
+            "all",
+        ] {
+            let block = parse_declaration_block(&format!("pointer-events: {keyword}"));
+            assert_eq!(
+                block.property_value("pointer-events"),
+                Some(keyword.to_ascii_lowercase()),
+                "{keyword}"
+            );
+        }
     }
 
     #[test]
