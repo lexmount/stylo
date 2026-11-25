@@ -6,7 +6,7 @@ use crate::attr::{
     AttrSelectorOperation, AttrSelectorWithOptionalNamespace, CaseSensitivity, NamespaceConstraint,
     ParsedAttrSelectorOperation, ParsedCaseSensitivity,
 };
-use crate::bloom::{BloomFilter, BLOOM_HASH_MASK};
+use crate::bloom::{BLOOM_HASH_MASK, BloomFilter};
 use crate::kleene_value::KleeneValue;
 use crate::parser::{
     AncestorHashes, Combinator, Component, LocalName, MatchesFeaturelessHost, NthSelectorData,
@@ -85,6 +85,9 @@ bitflags! {
             Self::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING.bits() |
             Self::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR.bits();
 
+        /// A shadow :host-context() match inspected this element.
+        const HOST_CONTEXT_DEPENDENCY = 1 << 10;
+
         /// A child of this element may be using sibling-index() or sibling-count(),
         /// and must be recascaded if other children are added or removed.
         const MAY_HAVE_TREE_COUNTING_FUNCTION = 1 << 11;
@@ -97,6 +100,7 @@ impl ElementSelectorFlags {
         self & (ElementSelectorFlags::HAS_EMPTY_SELECTOR
             | ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR
             | ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR_NON_SUBJECT
+            | ElementSelectorFlags::HOST_CONTEXT_DEPENDENCY
             | ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING
             | ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR)
     }
@@ -805,9 +809,11 @@ fn assigned_slot<E>(element: &E, context: &MatchingContext<E::Impl>) -> Option<E
 where
     E: Element,
 {
-    debug_assert!(element
-        .assigned_slot()
-        .map_or(true, |s| s.is_html_slot_element()));
+    debug_assert!(
+        element
+            .assigned_slot()
+            .map_or(true, |s| s.is_html_slot_element())
+    );
     let scope = context.current_host?;
     let mut current_slot = element.assigned_slot()?;
     while current_slot.containing_shadow_host().unwrap().opaque() != scope {
@@ -980,7 +986,7 @@ where
                 return result;
             },
             SelectorMatchingResult::Unknown | SelectorMatchingResult::NotMatchedGlobally => {
-                return result
+                return result;
             },
             _ => {},
         }
@@ -1131,6 +1137,9 @@ where
     let mut result = KleeneValue::False;
     let mut current = Some(element.clone());
     while let Some(candidate) = current {
+        if context.needs_selector_flags() {
+            candidate.apply_selector_flags(ElementSelectorFlags::HOST_CONTEXT_DEPENDENCY);
+        }
         let matched = context.nest(|context| {
             context.with_shadow_host(None::<E>, |context| {
                 context.with_featureless(false, |context| {
@@ -1410,17 +1419,17 @@ where
                     nth_of_data.selectors(),
                     rightmost,
                 )
-            })
+            });
         },
         Component::Is(ref list) | Component::Where(ref list) => {
             return context.shared.nest(|context| {
                 matches_complex_selector_list(list.slice(), element, context, rightmost)
-            })
+            });
         },
         Component::Negation(ref list) => {
             return context.shared.nest_for_negation(|context| {
                 !matches_complex_selector_list(list.slice(), element, context, rightmost)
-            })
+            });
         },
         Component::Has(ref relative_selectors) => {
             return match_relative_selectors(

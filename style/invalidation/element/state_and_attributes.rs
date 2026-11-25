@@ -11,25 +11,251 @@ use crate::dom::{TElement, TNode};
 use crate::invalidation::element::element_wrapper::{ElementSnapshot, ElementWrapper};
 use crate::invalidation::element::invalidation_map::*;
 use crate::invalidation::element::invalidator::{
-    any_next_has_scope_in_negation, note_scope_dependency_force_at_subject,
     DescendantInvalidationLists, InvalidationVector, SiblingTraversalMap,
+    any_next_has_scope_in_negation, note_scope_dependency_force_at_subject,
 };
 use crate::invalidation::element::invalidator::{Invalidation, InvalidationProcessor};
 use crate::invalidation::element::restyle_hints::RestyleHint;
-use crate::selector_map::SelectorMap;
 use crate::selector_parser::Snapshot;
 use crate::stylesheets::origin::OriginSet;
 use crate::values::AtomIdent;
 use crate::{Atom, WeakAtom};
 use dom::ElementState;
+use selectors::OpaqueElement;
 use selectors::attr::CaseSensitivity;
 use selectors::kleene_value::KleeneValue;
 use selectors::matching::{
-    matches_selector_kleene, MatchingContext, MatchingForInvalidation, MatchingMode,
-    NeedsSelectorFlags, SelectorCaches, VisitedHandlingMode,
+    MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, SelectorCaches,
+    VisitedHandlingMode, matches_selector_kleene,
 };
-use selectors::OpaqueElement;
 use smallvec::SmallVec;
+
+#[cfg(feature = "moli")]
+use crate::invalidation::element::relative_selector::RelativeSelectorInvalidator;
+#[cfg(feature = "moli")]
+use crate::selector_parser::SnapshotMap;
+#[cfg(feature = "moli")]
+use crate::stylist::{CascadeData, Stylist};
+#[cfg(feature = "moli")]
+use selectors::matching::ElementSelectorFlags;
+
+/// Old and new selector keys affected by a snapshot. Normal and relative
+/// invalidation look up the same keys in their respective dependency maps.
+struct SnapshotChanges<'a, E> {
+    element: E,
+    snapshot: &'a Snapshot,
+    removed_id: Option<&'a WeakAtom>,
+    added_id: Option<&'a WeakAtom>,
+    classes_removed: SmallVec<[Atom; 8]>,
+    classes_added: SmallVec<[Atom; 8]>,
+    custom_states_removed: SmallVec<[AtomIdent; 8]>,
+    custom_states_added: SmallVec<[AtomIdent; 8]>,
+    state_changes: ElementState,
+}
+
+impl<'a, E: TElement> SnapshotChanges<'a, E> {
+    fn new(element: &'a E, snapshot: &'a Snapshot, state_changes: ElementState) -> Self {
+        let mut changes = Self {
+            element: if element.implemented_pseudo_element().is_some() {
+                element.pseudo_element_originating_element().unwrap()
+            } else {
+                *element
+            },
+            snapshot,
+            removed_id: None,
+            added_id: None,
+            classes_removed: SmallVec::new(),
+            classes_added: SmallVec::new(),
+            custom_states_removed: SmallVec::new(),
+            custom_states_added: SmallVec::new(),
+            state_changes,
+        };
+
+        if snapshot.class_changed() {
+            snapshot.each_class(|class| {
+                if !element.has_class(class, CaseSensitivity::CaseSensitive) {
+                    changes.classes_removed.push(class.0.clone());
+                }
+            });
+            element.each_class(|class| {
+                if !snapshot.has_class(class, CaseSensitivity::CaseSensitive) {
+                    changes.classes_added.push(class.0.clone());
+                }
+            });
+        }
+
+        if snapshot.has_custom_states() {
+            snapshot.each_custom_state(|state| {
+                if !element.has_custom_state(state) {
+                    changes.custom_states_removed.push(state.clone());
+                }
+            });
+            element.each_custom_state(|state| {
+                if !snapshot.has_custom_state(state) {
+                    changes.custom_states_added.push(state.clone());
+                }
+            });
+        }
+
+        if snapshot.id_changed() {
+            let old_id = snapshot.id_attr();
+            let current_id = element.id();
+            if old_id != current_id {
+                changes.removed_id = old_id;
+                changes.added_id = current_id;
+            }
+        }
+        changes
+    }
+
+    fn each_dependency<'selectors>(
+        &self,
+        map: &'selectors InvalidationMap,
+        quirks_mode: crate::context::QuirksMode,
+        mut visit: impl FnMut(&'selectors Dependency),
+    ) {
+        for id in self.removed_id.into_iter().chain(self.added_id) {
+            if let Some(deps) = map.id_to_selector.get(id, quirks_mode) {
+                deps.iter().for_each(&mut visit);
+            }
+        }
+        for class in self.classes_added.iter().chain(&self.classes_removed) {
+            if let Some(deps) = map.class_to_selector.get(class, quirks_mode) {
+                deps.iter().for_each(&mut visit);
+            }
+        }
+        for state in self
+            .custom_states_added
+            .iter()
+            .chain(&self.custom_states_removed)
+        {
+            if let Some(deps) = map.custom_state_affecting_selectors.get(state) {
+                deps.iter().for_each(&mut visit);
+            }
+        }
+        self.snapshot.each_attr_changed(|attribute| {
+            if let Some(deps) = map.other_attribute_affecting_selectors.get(attribute) {
+                deps.iter().for_each(&mut visit);
+            }
+        });
+        if !self.state_changes.is_empty() {
+            map.state_affecting_selectors.lookup_with_additional(
+                self.element,
+                quirks_mode,
+                self.removed_id,
+                &self.classes_removed,
+                self.state_changes,
+                |dependency| {
+                    if dependency.state.intersects(self.state_changes) {
+                        visit(&dependency.dep);
+                    }
+                    true
+                },
+            );
+        }
+    }
+
+    #[cfg(feature = "moli")]
+    fn affects_nth_of(&self, data: &CascadeData) -> bool {
+        let mut found = false;
+        self.snapshot.each_attr_changed(|name| {
+            found |= data.might_have_nth_of_attribute_dependency(name);
+        });
+        found
+            || data.has_nth_of_state_dependency(self.state_changes)
+            || self
+                .removed_id
+                .into_iter()
+                .chain(self.added_id)
+                .any(|id| data.might_have_nth_of_id_dependency(id))
+            || self
+                .classes_added
+                .iter()
+                .chain(&self.classes_removed)
+                .any(|class| data.might_have_nth_of_class_dependency(class))
+            || self
+                .custom_states_added
+                .iter()
+                .chain(&self.custom_states_removed)
+                .any(|state| data.has_nth_of_custom_state_dependency(state))
+    }
+}
+
+/// Apply relative and filtered nth-child invalidation for an embedder that
+/// drains element snapshots together. This must run outside the source's
+/// ElementData borrow because an affected anchor can reach that element.
+#[cfg(feature = "moli")]
+pub fn invalidate_snapshot_dependencies<E: TElement>(
+    stylist: &Stylist,
+    snapshots: &SnapshotMap,
+    element: E,
+) {
+    if element.has_selector_flags(ElementSelectorFlags::HOST_CONTEXT_DEPENDENCY) {
+        // Host-context matching inspects elements outside a shadow rule's
+        // ordinary scope. Their style paths include the affected hosts.
+        element.note_style_invalidation(RestyleHint::RESTYLE_DESCENDANTS);
+    }
+    let wrapper = ElementWrapper::new(element, snapshots);
+    let Some(snapshot) = wrapper.snapshot() else {
+        return;
+    };
+    let changes = SnapshotChanges::new(&element, snapshot, wrapper.state_changes());
+    let mut selector_caches = SelectorCaches::default();
+    let mut matching_context = MatchingContext::new_for_visited(
+        MatchingMode::Normal,
+        None,
+        &mut selector_caches,
+        VisitedHandlingMode::AllLinksVisitedAndUnvisited,
+        stylist.quirks_mode(),
+        NeedsSelectorFlags::No,
+        MatchingForInvalidation::Yes,
+    );
+    RelativeSelectorInvalidator {
+        element,
+        quirks_mode: stylist.quirks_mode(),
+        snapshot_table: Some(snapshots),
+        invalidated: |_, _| {},
+        affected: None,
+        sibling_traversal_map: SiblingTraversalMap::default(),
+        _marker: std::marker::PhantomData,
+    }
+    .invalidate_relative_selectors_for_this(
+        stylist,
+        |_, host, data, quirks_mode, collector| {
+            matching_context.current_host = host;
+            changes.each_dependency(
+                data.relative_selector_invalidation_map(),
+                quirks_mode,
+                |dep| {
+                    if check_dependency(dep, &element, &wrapper, &mut matching_context, None) {
+                        collector.add_dependency(dep, element, host);
+                    }
+                },
+            );
+        },
+    );
+    if let Some(parent) = element.as_node().parent_element_or_host() {
+        let flags = ElementSelectorFlags::HAS_SLOW_SELECTOR;
+        let nth_of = parent.has_selector_flags(ElementSelectorFlags::HAS_SLOW_SELECTOR_NTH_OF);
+        if nth_of && stylist.any_applicable_rule_data(element, |data| changes.affects_nth_of(data))
+        {
+            // A changed member shifts following positions, or every position
+            // for :nth-last-child(of ...). The sibling roots carry nested
+            // selector work to the host's demand-driven traversal.
+            let mut current = Some(element);
+            if parent.has_selector_flags(flags) {
+                while let Some(previous) = current.and_then(|e| e.prev_sibling_element()) {
+                    current = Some(previous);
+                }
+            }
+            while let Some(sibling) = current {
+                invalidated_self(sibling);
+                sibling.note_style_invalidation(RestyleHint::RESTYLE_DESCENDANTS);
+                current = sibling.next_sibling_element();
+            }
+        }
+    }
+}
 
 /// The collector implementation.
 struct Collector<'a, 'b: 'a, 'selectors: 'a, E>
@@ -38,16 +264,7 @@ where
 {
     element: E,
     wrapper: ElementWrapper<'b, E>,
-    snapshot: &'a Snapshot,
     matching_context: &'a mut MatchingContext<'b, E::Impl>,
-    lookup_element: E,
-    removed_id: Option<&'a WeakAtom>,
-    added_id: Option<&'a WeakAtom>,
-    classes_removed: &'a SmallVec<[Atom; 8]>,
-    classes_added: &'a SmallVec<[Atom; 8]>,
-    custom_states_removed: &'a SmallVec<[AtomIdent; 8]>,
-    custom_states_added: &'a SmallVec<[AtomIdent; 8]>,
-    state_changes: ElementState,
     descendant_invalidations: &'a mut DescendantInvalidationLists<'selectors>,
     sibling_invalidations: &'a mut InvalidationVector<'selectors>,
     invalidates_self: bool,
@@ -141,6 +358,20 @@ pub fn should_process_descendants(data: &ElementData) -> bool {
     !data.styles.is_display_none() && !data.hint.contains(RestyleHint::RESTYLE_DESCENDANTS)
 }
 
+/// Uses the ordinary traversal boundary. A demand-driven host can retain
+/// queried styles under that boundary and invalidates them on its next read.
+pub(super) fn should_process_element_descendants<E: TElement>(
+    _element: E,
+    data: Option<&ElementData>,
+) -> bool {
+    #[cfg(feature = "moli")]
+    if data.is_none_or(|data| !data.has_styles() || data.styles.is_display_none()) {
+        _element.note_style_invalidation(RestyleHint::RESTYLE_DESCENDANTS);
+        return false;
+    }
+    data.is_some_and(should_process_descendants)
+}
+
 /// Propagates the bits after invalidating a descendant child.
 pub fn propagate_dirty_bit_up_to<E>(ancestor: E, child: E)
 where
@@ -160,6 +391,7 @@ where
             return;
         }
     }
+    #[cfg(not(feature = "moli"))]
     debug_assert!(
         false,
         "Should've found {:?} as an ancestor of {:?}",
@@ -189,6 +421,8 @@ where
         None => return false,
     };
     data.hint.insert(RestyleHint::RESTYLE_SELF);
+    #[cfg(feature = "moli")]
+    element.note_style_invalidation(RestyleHint::RESTYLE_SELF);
     true
 }
 
@@ -278,81 +512,7 @@ where
             return false;
         }
 
-        let mut classes_removed = SmallVec::<[Atom; 8]>::new();
-        let mut classes_added = SmallVec::<[Atom; 8]>::new();
-        if snapshot.class_changed() {
-            // TODO(emilio): Do this more efficiently!
-            snapshot.each_class(|c| {
-                if !element.has_class(c, CaseSensitivity::CaseSensitive) {
-                    classes_removed.push(c.0.clone())
-                }
-            });
-
-            element.each_class(|c| {
-                if !snapshot.has_class(c, CaseSensitivity::CaseSensitive) {
-                    classes_added.push(c.0.clone())
-                }
-            })
-        }
-
-        let mut custom_states_removed = SmallVec::<[AtomIdent; 8]>::new();
-        let mut custom_states_added = SmallVec::<[AtomIdent; 8]>::new();
-        if snapshot.has_custom_states() {
-            snapshot.each_custom_state(|s| {
-                if !element.has_custom_state(s) {
-                    custom_states_removed.push(s.clone())
-                }
-            });
-            element.each_custom_state(|s| {
-                if !snapshot.has_custom_state(s) {
-                    custom_states_added.push(s.clone())
-                }
-            })
-        }
-
-        let mut id_removed = None;
-        let mut id_added = None;
-        if snapshot.id_changed() {
-            let old_id = snapshot.id_attr();
-            let current_id = element.id();
-
-            if old_id != current_id {
-                id_removed = old_id;
-                id_added = current_id;
-            }
-        }
-
-        if log_enabled!(::log::Level::Debug) {
-            debug!("Collecting changes for: {:?}", element);
-            if !state_changes.is_empty() {
-                debug!(" > state: {:?}", state_changes);
-            }
-            if snapshot.id_changed() {
-                debug!(" > id changed: +{:?} -{:?}", id_added, id_removed);
-            }
-            if snapshot.class_changed() {
-                debug!(
-                    " > class changed: +{:?} -{:?}",
-                    classes_added, classes_removed
-                );
-            }
-            let mut attributes_changed = false;
-            snapshot.each_attr_changed(|_| {
-                attributes_changed = true;
-            });
-            if attributes_changed {
-                debug!(
-                    " > attributes changed, old: {}",
-                    snapshot.debug_list_attributes()
-                )
-            }
-        }
-
-        let lookup_element = if element.implemented_pseudo_element().is_some() {
-            element.pseudo_element_originating_element().unwrap()
-        } else {
-            element
-        };
+        let changes = SnapshotChanges::new(&element, snapshot, state_changes);
 
         let mut shadow_rule_datas = SmallVec::<[_; 3]>::new();
         let matches_document_author_rules =
@@ -363,17 +523,8 @@ where
         let invalidated_self = {
             let mut collector = Collector {
                 wrapper,
-                lookup_element,
-                state_changes,
                 element,
-                snapshot,
                 matching_context: &mut self.matching_context,
-                removed_id: id_removed,
-                added_id: id_added,
-                classes_removed: &classes_removed,
-                classes_added: &classes_added,
-                custom_states_removed: &custom_states_removed,
-                custom_states_added: &custom_states_added,
                 descendant_invalidations,
                 sibling_invalidations,
                 invalidates_self: false,
@@ -387,14 +538,17 @@ where
 
             for (cascade_data, origin) in self.shared_context.stylist.iter_origins() {
                 if document_origins.contains(origin.into()) {
-                    collector
-                        .collect_dependencies_in_invalidation_map(cascade_data.invalidation_map());
+                    collector.collect_dependencies_in_invalidation_map(
+                        cascade_data.invalidation_map(),
+                        &changes,
+                    );
                 }
             }
 
             for &(data, ref host) in &shadow_rule_datas {
                 collector.matching_context.current_host = Some(*host);
-                collector.collect_dependencies_in_invalidation_map(data.invalidation_map());
+                collector
+                    .collect_dependencies_in_invalidation_map(data.invalidation_map(), &changes);
             }
 
             collector.invalidates_self
@@ -410,12 +564,17 @@ where
         //
         // We don't look at slotted_descendants because those don't propagate
         // down more than one level anyway.
+        let mut hint = RestyleHint::empty();
         if descendant_invalidations.dom_descendants.len() > 150 {
-            self.data.hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
+            hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
         }
-
         if invalidated_self {
-            self.data.hint.insert(RestyleHint::RESTYLE_SELF);
+            hint.insert(RestyleHint::RESTYLE_SELF);
+        }
+        self.data.hint.insert(hint);
+        #[cfg(feature = "moli")]
+        if !hint.is_empty() {
+            element.note_style_invalidation(hint);
         }
 
         invalidated_self
@@ -423,16 +582,15 @@ where
 
     fn should_process_descendants(&mut self, element: E) -> bool {
         if element == self.element {
-            return should_process_descendants(self.data);
+            return should_process_element_descendants(element, Some(self.data));
         }
 
-        match element.borrow_data() {
-            Some(d) => should_process_descendants(&d),
-            None => false,
-        }
+        should_process_element_descendants(element, element.borrow_data().as_deref())
     }
 
     fn recursion_limit_exceeded(&mut self, element: E) {
+        #[cfg(feature = "moli")]
+        element.note_style_invalidation(RestyleHint::RESTYLE_DESCENDANTS);
         if element == self.element {
             self.data.hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
             return;
@@ -467,75 +625,14 @@ where
     E: TElement,
     'selectors: 'a,
 {
-    fn collect_dependencies_in_invalidation_map(&mut self, map: &'selectors InvalidationMap) {
-        let quirks_mode = self.matching_context.quirks_mode();
-        let removed_id = self.removed_id;
-        if let Some(id) = removed_id {
-            if let Some(deps) = map.id_to_selector.get(id, quirks_mode) {
-                for dep in deps {
-                    self.scan_dependency(dep, false);
-                }
-            }
-        }
-
-        let added_id = self.added_id;
-        if let Some(id) = added_id {
-            if let Some(deps) = map.id_to_selector.get(id, quirks_mode) {
-                for dep in deps {
-                    self.scan_dependency(dep, false);
-                }
-            }
-        }
-
-        for class in self.classes_added.iter().chain(self.classes_removed.iter()) {
-            if let Some(deps) = map.class_to_selector.get(class, quirks_mode) {
-                for dep in deps {
-                    self.scan_dependency(dep, false);
-                }
-            }
-        }
-
-        for state in self
-            .custom_states_added
-            .iter()
-            .chain(self.custom_states_removed.iter())
-        {
-            if let Some(deps) = map.custom_state_affecting_selectors.get(state) {
-                for dep in deps {
-                    self.scan_dependency(dep, false);
-                }
-            }
-        }
-
-        self.snapshot.each_attr_changed(|attribute| {
-            if let Some(deps) = map.other_attribute_affecting_selectors.get(attribute) {
-                for dep in deps {
-                    self.scan_dependency(dep, false);
-                }
-            }
+    fn collect_dependencies_in_invalidation_map(
+        &mut self,
+        map: &'selectors InvalidationMap,
+        changes: &SnapshotChanges<E>,
+    ) {
+        changes.each_dependency(map, self.matching_context.quirks_mode(), |dep| {
+            self.scan_dependency(dep, false)
         });
-
-        self.collect_state_dependencies(&map.state_affecting_selectors)
-    }
-
-    fn collect_state_dependencies(&mut self, map: &'selectors SelectorMap<StateDependency>) {
-        if self.state_changes.is_empty() {
-            return;
-        }
-        map.lookup_with_additional(
-            self.lookup_element,
-            self.matching_context.quirks_mode(),
-            self.removed_id,
-            self.classes_removed,
-            self.state_changes,
-            |dependency| {
-                if !dependency.state.intersects(self.state_changes) {
-                    return true;
-                }
-                self.scan_dependency(&dependency.dep, false);
-                true
-            },
-        );
     }
 
     /// Check whether a dependency should be taken into account.

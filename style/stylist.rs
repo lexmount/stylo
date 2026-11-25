@@ -28,11 +28,6 @@ use crate::invalidation::media_queries::{
     EffectiveMediaQueryResults, MediaListKey, ToMediaListKey,
 };
 use crate::invalidation::stylesheets::{RuleChangeKind, StylesheetInvalidationSet};
-use crate::moli_invalidation::{
-    MoliChildListStructuralBoundaryDependencySummary, MoliDependencyInvalidationSummary,
-    moli_dependency_summary_for_invalidation_map,
-    moli_dependency_summary_for_relative_invalidation_map,
-};
 #[cfg(feature = "gecko")]
 use crate::properties::StyleBuilder;
 use crate::properties::{
@@ -69,10 +64,10 @@ use crate::stylesheets::scope_rule::{
     element_is_outside_of_scope, scope_selector_list_is_trivial,
 };
 use crate::stylesheets::{
-    AllRules, CounterStyleRule, CssRule, CssRuleRef, EffectiveRules, FontFaceRule,
-    FontFeatureValuesRule, FontPaletteValuesRule, NestedRuleIterationCondition, Origin, OriginSet,
-    PagePseudoClassFlags, PageRule, PerOrigin, PerOriginIter, PositionTryRule, RulesIterator,
-    StylesheetContents, StylesheetInDocument, ViewTransitionRule,
+    CounterStyleRule, CssRule, CssRuleRef, EffectiveRules, FontFaceRule, FontFeatureValuesRule,
+    FontPaletteValuesRule, NestedRuleIterationCondition, Origin, OriginSet, PagePseudoClassFlags,
+    PageRule, PerOrigin, PerOriginIter, PositionTryRule, RulesIterator, StylesheetContents,
+    StylesheetInDocument, ViewTransitionRule,
 };
 use crate::stylesheets::{CustomMediaEvaluator, CustomMediaMap};
 #[cfg(feature = "gecko")]
@@ -2615,9 +2610,6 @@ struct StylistSelectorVisitor<'a> {
     /// Whether any selector can make the match result of an element that isn't
     /// itself a link depend on the visitedness of a link.
     non_link_visited_dependency: &'a mut bool,
-    /// Whether the selector depends on child-list structural state such as
-    /// :empty, :first-child, or :nth-child().
-    has_child_list_structural_dependency: &'a mut bool,
 
     /// Flags for which selector list-containing components the visitor is
     /// inside of, if any
@@ -2669,163 +2661,6 @@ fn component_needs_revalidation(c: &Component<SelectorImpl>) -> bool {
         | Component::Has(_) => true,
         Component::NonTSPseudoClass(ref p) => p.needs_cache_revalidation(),
         _ => false,
-    }
-}
-
-fn component_has_child_list_structural_dependency(c: &Component<SelectorImpl>) -> bool {
-    matches!(
-        c,
-        Component::Empty | Component::Nth(_) | Component::NthOf(_)
-    )
-}
-
-#[derive(Clone)]
-enum MoliStructuralBoundaryKey {
-    Id(Atom),
-    Class(Atom),
-    Attribute(LocalName),
-    Type(LocalName),
-    Universal,
-}
-
-impl MoliStructuralBoundaryKey {
-    fn specificity(&self) -> u8 {
-        match self {
-            Self::Universal => 0,
-            Self::Type(_) => 1,
-            Self::Attribute(_) => 2,
-            Self::Class(_) => 3,
-            Self::Id(_) => 4,
-        }
-    }
-
-    fn note_in(self, summary: &mut MoliChildListStructuralBoundaryDependencySummary) {
-        match self {
-            Self::Id(id) => summary.note_id_dependency(id),
-            Self::Class(class) => summary.note_class_dependency(class),
-            Self::Attribute(attribute) => summary.note_attribute_dependency(attribute),
-            Self::Type(local_name) => summary.note_type_dependency(local_name),
-            Self::Universal => summary.note_universal_dependency(),
-        }
-    }
-}
-
-fn moli_structural_boundary_key_for_compound(
-    components: &[&Component<SelectorImpl>],
-) -> MoliStructuralBoundaryKey {
-    let mut selected = MoliStructuralBoundaryKey::Universal;
-    for component in components {
-        let candidate = match component {
-            Component::ID(id) => MoliStructuralBoundaryKey::Id(id.0.clone()),
-            Component::Class(class) => MoliStructuralBoundaryKey::Class(class.0.clone()),
-            Component::AttributeInNoNamespaceExists {
-                local_name_lower, ..
-            } => MoliStructuralBoundaryKey::Attribute(local_name_lower.clone()),
-            Component::AttributeInNoNamespace { local_name, .. } => {
-                MoliStructuralBoundaryKey::Attribute(local_name.clone())
-            },
-            Component::AttributeOther(attribute) => {
-                MoliStructuralBoundaryKey::Attribute(attribute.local_name.clone())
-            },
-            Component::LocalName(local_name) => {
-                MoliStructuralBoundaryKey::Type(local_name.lower_name.clone())
-            },
-            _ => continue,
-        };
-        if candidate.specificity() >= selected.specificity() {
-            selected = candidate;
-        }
-    }
-    selected
-}
-
-fn moli_selector_has_nested_child_list_structural_dependency(
-    selector: &Selector<SelectorImpl>,
-) -> bool {
-    let mut iter = selector.iter();
-    loop {
-        for component in &mut iter {
-            if component_has_child_list_structural_dependency(component)
-                || moli_component_has_nested_child_list_structural_dependency(component)
-            {
-                return true;
-            }
-        }
-        if iter.next_sequence().is_none() {
-            return false;
-        }
-    }
-}
-
-fn moli_component_has_nested_child_list_structural_dependency(
-    component: &Component<SelectorImpl>,
-) -> bool {
-    match component {
-        Component::Negation(selectors) | Component::Is(selectors) | Component::Where(selectors) => {
-            selectors
-                .slice()
-                .iter()
-                .any(moli_selector_has_nested_child_list_structural_dependency)
-        },
-        Component::Slotted(selector)
-        | Component::Host(Some(selector))
-        | Component::HostContext(selector) => {
-            moli_selector_has_nested_child_list_structural_dependency(selector)
-        },
-        Component::Has(selectors) => selectors.iter().any(|selector| {
-            moli_selector_has_nested_child_list_structural_dependency(&selector.selector)
-        }),
-        _ => false,
-    }
-}
-
-fn moli_note_child_list_structural_boundary_dependencies(
-    selector: &Selector<SelectorImpl>,
-    summary: &mut MoliChildListStructuralBoundaryDependencySummary,
-) {
-    let mut iter = selector.iter();
-    let mut compounds = Vec::new();
-    loop {
-        let components = (&mut iter).collect::<Vec<_>>();
-        let combinator_to_left = iter.next_sequence();
-        compounds.push((components, combinator_to_left));
-        if combinator_to_left.is_none() {
-            break;
-        }
-    }
-
-    for (index, (components, combinator_to_left)) in compounds.iter().enumerate() {
-        if components
-            .iter()
-            .any(|component| matches!(component, Component::Empty))
-        {
-            moli_structural_boundary_key_for_compound(components).note_in(summary);
-        }
-        if components
-            .iter()
-            .any(|component| matches!(component, Component::Nth(_) | Component::NthOf(_)))
-        {
-            if *combinator_to_left == Some(Combinator::Child) {
-                compounds
-                    .get(index + 1)
-                    .map(|(parent_components, _)| {
-                        moli_structural_boundary_key_for_compound(parent_components)
-                    })
-                    .unwrap_or(MoliStructuralBoundaryKey::Universal)
-                    .note_in(summary);
-            } else {
-                summary.note_universal_dependency();
-            }
-        }
-        if components
-            .iter()
-            .any(|component| moli_component_has_nested_child_list_structural_dependency(component))
-        {
-            // Nested selector-list structural state can change direction and
-            // scope (notably through :has()). Keep this branch conservative
-            // until its boundary relation is represented explicitly.
-            summary.note_universal_dependency();
-        }
     }
 }
 
@@ -2911,8 +2746,6 @@ impl<'a> SelectorVisitor for StylistSelectorVisitor<'a> {
 
     fn visit_simple_selector(&mut self, s: &Component<SelectorImpl>) -> bool {
         *self.needs_revalidation = *self.needs_revalidation || component_needs_revalidation(s);
-        *self.has_child_list_structural_dependency = *self.has_child_list_structural_dependency
-            || component_has_child_list_structural_dependency(s);
 
         match *s {
             Component::NonTSPseudoClass(NonTSPseudoClass::CustomState(ref name)) => {
@@ -3488,15 +3321,6 @@ pub struct CascadeData {
 
     additional_relative_selector_invalidation_map: AdditionalRelativeSelectorInvalidationMap,
 
-    /// Whether any selector in this cascade data depends on child-list
-    /// structural state, such as :empty or :nth-child().
-    has_child_list_structural_dependency: bool,
-
-    /// Selector-derived keys for boundaries whose children can affect
-    /// tree-structural selector matching.
-    moli_child_list_structural_boundary_dependencies:
-        MoliChildListStructuralBoundaryDependencySummary,
-
     /// The attribute local names that appear in attribute selectors.  Used
     /// to avoid taking element snapshots when an irrelevant attribute changes.
     /// (We don't bother storing the namespace, since namespaced attributes are
@@ -3639,9 +3463,6 @@ impl CascadeData {
             relative_selector_invalidation_map: InvalidationMap::new(),
             additional_relative_selector_invalidation_map:
                 AdditionalRelativeSelectorInvalidationMap::new(),
-            has_child_list_structural_dependency: false,
-            moli_child_list_structural_boundary_dependencies:
-                MoliChildListStructuralBoundaryDependencySummary::default(),
             nth_of_mapped_ids: PrecomputedHashSet::default(),
             nth_of_class_dependencies: PrecomputedHashSet::default(),
             nth_of_attribute_dependencies: PrecomputedHashSet::default(),
@@ -3757,54 +3578,21 @@ impl CascadeData {
         self.state_dependencies.intersects(state)
     }
 
-    /// Returns whether any selector in this cascade data depends on child-list
-    /// structural state, such as :empty or :nth-child().
-    #[inline]
-    pub fn has_child_list_structural_dependency(&self) -> bool {
-        self.has_child_list_structural_dependency
-    }
-
-    /// Returns selector-derived child-list structural boundary keys for
-    /// Moli source dependency planning.
-    #[inline]
-    pub(crate) fn moli_child_list_structural_boundary_dependency_summary(
-        &self,
-    ) -> &MoliChildListStructuralBoundaryDependencySummary {
-        &self.moli_child_list_structural_boundary_dependencies
-    }
-
-    /// Returns keyed selector dependency query data for Moli style
-    /// invalidation.
-    pub(crate) fn moli_dependency_invalidation_summary(&self) -> MoliDependencyInvalidationSummary {
-        let mut summary = moli_dependency_summary_for_invalidation_map(&self.invalidation_map);
-        summary.extend(moli_dependency_summary_for_invalidation_map(
-            &self.relative_selector_invalidation_map,
-        ));
-        summary.extend(moli_dependency_summary_for_relative_invalidation_map(
-            &self.additional_relative_selector_invalidation_map,
-        ));
-        for class in &self.nth_of_class_dependencies {
-            summary.note_nth_of_class_dependency(class.clone());
-        }
-        for id in &self.nth_of_mapped_ids {
-            summary.note_nth_of_id_dependency(id.clone());
-        }
-        for attribute in &self.nth_of_attribute_dependencies {
-            summary.note_nth_of_attribute_dependency(attribute.clone());
-        }
-        for state in &self.nth_of_custom_state_dependencies {
-            summary.note_nth_of_custom_state_dependency(state.clone());
-        }
-        summary.note_nth_of_state_dependency(self.nth_of_state_dependencies);
-        summary.note_unrepresented_state_dependencies(self.state_dependencies);
-        summary
-    }
-
     /// Returns whether the given Custom State is relied upon by a selector
     /// of some rule in the selector list of :nth-child(... of <selector list>).
     #[inline]
     pub fn has_nth_of_custom_state_dependency(&self, state: &AtomIdent) -> bool {
         self.nth_of_custom_state_dependencies.contains(state)
+    }
+
+    /// Whether changes to selector membership can affect sibling positions.
+    #[cfg(feature = "moli")]
+    pub fn has_nth_of_dependencies(&self) -> bool {
+        !self.nth_of_mapped_ids.is_empty()
+            || !self.nth_of_class_dependencies.is_empty()
+            || !self.nth_of_attribute_dependencies.is_empty()
+            || !self.nth_of_custom_state_dependencies.is_empty()
+            || !self.nth_of_state_dependencies.is_empty()
     }
 
     /// Returns whether the given ElementState bit is relied upon by a selector
@@ -4200,10 +3988,8 @@ impl CascadeData {
                     None,
                 )?;
                 let mut needs_revalidation = false;
-                let mut has_child_list_structural_dependency = false;
                 let mut visitor = StylistSelectorVisitor {
                     needs_revalidation: &mut needs_revalidation,
-                    has_child_list_structural_dependency: &mut has_child_list_structural_dependency,
                     passed_rightmost_selector: false,
                     non_link_visited_dependency: &mut self.non_link_visited_dependency,
                     in_selector_list_of: SelectorListKind::default(),
@@ -4218,13 +4004,6 @@ impl CascadeData {
                     document_state_dependencies: &mut self.document_state_dependencies,
                 };
                 rule.selector.visit(&mut visitor);
-                self.has_child_list_structural_dependency |= has_child_list_structural_dependency;
-                if has_child_list_structural_dependency {
-                    moli_note_child_list_structural_boundary_dependencies(
-                        &rule.selector,
-                        &mut self.moli_child_list_structural_boundary_dependencies,
-                    );
-                }
 
                 if needs_revalidation {
                     self.selectors_for_cache_revalidation.insert(
@@ -4742,11 +4521,8 @@ impl CascadeData {
                 let cur_scope = &self.scope_conditions[scope_idx.0 as usize];
                 if let Some(cond) = cur_scope.condition.as_ref() {
                     let mut _unused = false;
-                    let mut has_child_list_structural_dependency = false;
                     let visitor = StylistSelectorVisitor {
                         needs_revalidation: &mut _unused,
-                        has_child_list_structural_dependency:
-                            &mut has_child_list_structural_dependency,
                         passed_rightmost_selector: true,
                         non_link_visited_dependency: &mut self.non_link_visited_dependency,
                         in_selector_list_of: SelectorListKind::default(),
@@ -4771,12 +4547,6 @@ impl CascadeData {
                         &mut self.relative_selector_invalidation_map,
                         &mut self.additional_relative_selector_invalidation_map,
                     )?;
-                    self.has_child_list_structural_dependency |=
-                        has_child_list_structural_dependency;
-                    if has_child_list_structural_dependency {
-                        self.moli_child_list_structural_boundary_dependencies
-                            .note_universal_dependency();
-                    }
 
                     containing_rule_state
                         .containing_scope_rule_state
@@ -4829,45 +4599,6 @@ impl CascadeData {
             &mut state,
             precomputed_pseudo_element_decls,
             difference,
-        )?;
-
-        Ok(())
-    }
-
-    /// Adds every style rule in a stylesheet to this cascade data, ignoring
-    /// device-dependent nested-rule filtering.
-    ///
-    /// This is intended for Moli source metadata extraction. It builds
-    /// conservative invalidation summaries from selector syntax without tying
-    /// those summaries to a particular viewport, media type, or color scheme.
-    pub fn add_stylesheet_for_moli_source_metadata<S>(
-        &mut self,
-        device: &Device,
-        quirks_mode: QuirksMode,
-        stylesheet: &S,
-        sheet_index: usize,
-        guard: &SharedRwLockReadGuard,
-    ) -> Result<(), AllocErr>
-    where
-        S: StylesheetInDocument + 'static,
-    {
-        if !stylesheet.enabled() {
-            return Ok(());
-        }
-
-        let contents = stylesheet.contents(guard);
-        let mut state = ContainingRuleState::default();
-        self.add_rule_list::<AllRules, S>(
-            contents.rules(guard).iter(),
-            device,
-            quirks_mode,
-            stylesheet,
-            sheet_index,
-            guard,
-            SheetRebuildKind::Full,
-            &mut state,
-            None,
-            None,
         )?;
 
         Ok(())
@@ -5066,9 +4797,6 @@ impl CascadeData {
         self.invalidation_map.clear();
         self.relative_selector_invalidation_map.clear();
         self.additional_relative_selector_invalidation_map.clear();
-        self.has_child_list_structural_dependency = false;
-        self.moli_child_list_structural_boundary_dependencies =
-            MoliChildListStructuralBoundaryDependencySummary::default();
         self.attribute_dependencies.clear();
         self.attr_function_dependencies.clear();
         self.nth_of_attribute_dependencies.clear();
@@ -5388,12 +5116,10 @@ pub fn needs_revalidation_for_testing(s: &Selector<SelectorImpl>) -> bool {
     let mut nth_of_state_dependencies = ElementState::empty();
     let mut document_state_dependencies = DocumentState::empty();
     let mut non_link_visited_dependency = false;
-    let mut has_child_list_structural_dependency = false;
     let mut visitor = StylistSelectorVisitor {
         passed_rightmost_selector: false,
         needs_revalidation: &mut needs_revalidation,
         non_link_visited_dependency: &mut non_link_visited_dependency,
-        has_child_list_structural_dependency: &mut has_child_list_structural_dependency,
         in_selector_list_of: SelectorListKind::default(),
         mapped_ids: &mut mapped_ids,
         nth_of_mapped_ids: &mut nth_of_mapped_ids,
@@ -5412,58 +5138,9 @@ pub fn needs_revalidation_for_testing(s: &Selector<SelectorImpl>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::moli_invalidation::MoliStyleInvalidationQuery;
-    use crate::selector_parser::SelectorParser;
 
     fn url_data() -> UrlExtraData {
         UrlExtraData::from(url::Url::parse("https://example.test/").unwrap())
-    }
-
-    fn structural_boundary_summary_for_selector(
-        selector_text: &str,
-    ) -> MoliChildListStructuralBoundaryDependencySummary {
-        let selectors =
-            SelectorParser::parse_author_origin_no_namespace(selector_text, &url_data())
-                .expect("selector should parse");
-        let mut summary = MoliChildListStructuralBoundaryDependencySummary::default();
-        for selector in selectors.slice() {
-            moli_note_child_list_structural_boundary_dependencies(selector, &mut summary);
-        }
-        summary
-    }
-
-    #[test]
-    fn moli_structural_boundary_summary_keys_selector_relationships() {
-        let details = structural_boundary_summary_for_selector("details > summary:first-of-type");
-        assert!(details.matches_query(MoliStyleInvalidationQuery::Type("details")));
-        assert!(!details.matches_query(MoliStyleInvalidationQuery::Type("summary")));
-        assert!(!details.matches_query(MoliStyleInvalidationQuery::Type("section")));
-
-        let empty = structural_boundary_summary_for_selector("section:empty");
-        assert!(empty.matches_query(MoliStyleInvalidationQuery::Type("section")));
-        assert!(!empty.matches_query(MoliStyleInvalidationQuery::Universal));
-
-        let keyed_nth = structural_boundary_summary_for_selector(".items > .item:last-child");
-        assert!(keyed_nth.matches_query(MoliStyleInvalidationQuery::Class("items")));
-        assert!(!keyed_nth.matches_query(MoliStyleInvalidationQuery::Class("item")));
-
-        let unscoped_nth = structural_boundary_summary_for_selector(".item:last-child");
-        assert!(unscoped_nth.matches_query(MoliStyleInvalidationQuery::Universal));
-    }
-
-    #[test]
-    fn moli_dependency_summary_exports_nth_of_custom_state_dependencies() {
-        let mut cascade_data = CascadeData::new();
-        let state = AtomIdent::from("--active");
-        cascade_data
-            .nth_of_custom_state_dependencies
-            .insert(state.clone());
-
-        let dependency = cascade_data
-            .moli_dependency_invalidation_summary()
-            .query_custom_state(&state);
-
-        assert!(dependency.requires_fallback());
     }
 
     fn assert_registration_valid(syntax: &str, initial_value: Option<&str>) {

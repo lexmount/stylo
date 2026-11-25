@@ -15,29 +15,28 @@ use crate::invalidation::element::invalidation_map::{
     ScopeDependencyInvalidationKind, TSStateForInvalidation,
 };
 use crate::invalidation::element::invalidator::{
-    note_scope_dependency_force_at_subject, DescendantInvalidationLists, Invalidation,
-    InvalidationProcessor, InvalidationResult, InvalidationVector, SiblingTraversalMap,
-    TreeStyleInvalidator,
+    DescendantInvalidationLists, Invalidation, InvalidationProcessor, InvalidationResult,
+    InvalidationVector, SiblingTraversalMap, TreeStyleInvalidator,
+    note_scope_dependency_force_at_subject,
 };
 use crate::invalidation::element::restyle_hints::RestyleHint;
 use crate::invalidation::element::state_and_attributes::{
     check_dependency, dependency_may_be_relevant, invalidated_descendants, invalidated_self,
-    invalidated_sibling, push_invalidation, should_process_descendants,
+    invalidated_sibling, push_invalidation, should_process_element_descendants,
 };
 #[cfg(feature = "servo")]
 use crate::selector_parser::SnapshotMap as ServoElementSnapshotTable;
 use crate::stylist::{CascadeData, Stylist};
 use dom::ElementState;
 use rustc_hash::FxHashMap;
+use selectors::OpaqueElement;
 use selectors::matching::{
-    early_reject_by_local_name, matches_selector, ElementSelectorFlags, MatchingContext,
-    MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, QuirksMode, SelectorCaches,
-    VisitedHandlingMode,
+    ElementSelectorFlags, MatchingContext, MatchingForInvalidation, MatchingMode,
+    NeedsSelectorFlags, QuirksMode, SelectorCaches, VisitedHandlingMode,
+    early_reject_by_local_name, matches_selector,
 };
 use selectors::parser::SelectorKey;
-use selectors::OpaqueElement;
-use smallvec::{smallvec, SmallVec};
-use std::ops::DerefMut;
+use smallvec::{SmallVec, smallvec};
 
 /// Kind of DOM mutation this relative selector invalidation is being carried out in.
 #[derive(Clone, Copy)]
@@ -859,9 +858,19 @@ where
     fn invalidate_upwards(&self, element: E, invalidation: &RelativeSelectorInvalidation<'a>) {
         // This contains the main reason for why relative selector invalidation is handled
         // separately - It travels ancestor and/or earlier sibling direction.
+        let parent_for = |element: E| {
+            let parent = element.parent_element();
+            #[cfg(feature = "moli")]
+            let parent = parent.or_else(|| {
+                element.containing_shadow_host().filter(|host| {
+                    Some(host.opaque()) == invalidation.host && element.parent_node_is_shadow_root()
+                })
+            });
+            parent
+        };
         match invalidation.kind {
             RelativeDependencyInvalidationKind::Parent => {
-                if let Some(e) = element.parent_element() {
+                if let Some(e) = parent_for(element) {
                     if !Self::in_search_direction(
                         &e,
                         ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR,
@@ -872,7 +881,7 @@ where
                 }
             },
             RelativeDependencyInvalidationKind::Ancestors => {
-                let mut parent = element.parent_element();
+                let mut parent = parent_for(element);
                 while let Some(par) = parent {
                     if !Self::in_search_direction(
                         &par,
@@ -881,7 +890,7 @@ where
                         return;
                     }
                     self.handle_anchor(par, invalidation.dependency, invalidation.host);
-                    parent = par.parent_element();
+                    parent = parent_for(par);
                 }
             },
             RelativeDependencyInvalidationKind::PrevSibling => {
@@ -896,7 +905,7 @@ where
                 }
             },
             RelativeDependencyInvalidationKind::AncestorPrevSibling => {
-                let mut parent = element.parent_element();
+                let mut parent = parent_for(element);
                 while let Some(par) = parent {
                     if !Self::in_search_direction(
                         &par,
@@ -913,7 +922,7 @@ where
                         }
                         self.handle_anchor(e, invalidation.dependency, invalidation.host);
                     }
-                    parent = par.parent_element();
+                    parent = parent_for(par);
                 }
             },
             RelativeDependencyInvalidationKind::EarlierSibling => {
@@ -930,7 +939,7 @@ where
                 }
             },
             RelativeDependencyInvalidationKind::AncestorEarlierSibling => {
-                let mut parent = element.parent_element();
+                let mut parent = parent_for(element);
                 while let Some(par) = parent {
                     if !Self::in_search_direction(
                         &par,
@@ -949,7 +958,7 @@ where
                         self.handle_anchor(sib, invalidation.dependency, invalidation.host);
                         sibling = sib.prev_sibling_element();
                     }
-                    parent = par.parent_element();
+                    parent = parent_for(par);
                 }
             },
         }
@@ -957,6 +966,17 @@ where
 
     /// Is this element in the direction of the given relative selector search path?
     fn in_search_direction(element: &E, desired: ElementSelectorFlags) -> bool {
+        #[cfg(feature = "moli")]
+        if element.has_selector_flags(ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR)
+            || element
+                .has_selector_flags(ElementSelectorFlags::ANCHORS_RELATIVE_SELECTOR_NON_SUBJECT)
+            || (desired.contains(ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_ANCESTOR)
+                && !element.has_data())
+        {
+            // A demand-driven host can have matched an empty anchor before
+            // insertion without recording the surrounding search path.
+            return true;
+        }
         element
             .relative_selector_search_direction()
             .intersects(desired)
@@ -981,7 +1001,7 @@ where
             return;
         }
         let mut selector_caches = SelectorCaches::default();
-        let matching_context = MatchingContext::<'_, E::Impl>::new_for_visited(
+        let mut matching_context = MatchingContext::<'_, E::Impl>::new_for_visited(
             MatchingMode::Normal,
             None,
             &mut selector_caches,
@@ -990,14 +1010,20 @@ where
             NeedsSelectorFlags::No,
             MatchingForInvalidation::Yes,
         );
-        let mut data = match element.mutate_data() {
-            Some(data) => data,
-            None => return,
+        matching_context.current_host = host;
+        let mut data = element.mutate_data();
+        #[cfg(not(feature = "moli"))]
+        let Some(data) = data.as_deref_mut() else {
+            return;
         };
+        #[cfg(feature = "moli")]
+        let mut scratch = ElementData::default();
+        #[cfg(feature = "moli")]
+        let data = data.as_deref_mut().unwrap_or(&mut scratch);
         let mut processor = RelativeSelectorOuterInvalidationProcessor {
             element,
             host,
-            data: data.deref_mut(),
+            data,
             dependency: outer_dependency,
             matching_context,
             traversal_map: &self.sibling_traversal_map,
@@ -1189,6 +1215,8 @@ where
 
         if invalidated_self {
             self.data.hint.insert(RestyleHint::RESTYLE_SELF);
+            #[cfg(feature = "moli")]
+            element.note_style_invalidation(RestyleHint::RESTYLE_SELF);
             self.note_affected(element);
         }
         invalidated_self
@@ -1196,16 +1224,15 @@ where
 
     fn should_process_descendants(&mut self, element: E) -> bool {
         if element == self.element {
-            return should_process_descendants(self.data);
+            return should_process_element_descendants(element, Some(self.data));
         }
-
-        match element.borrow_data() {
-            Some(d) => should_process_descendants(&d),
-            None => false,
-        }
+        should_process_element_descendants(element, element.borrow_data().as_deref())
     }
 
     fn recursion_limit_exceeded(&mut self, _element: E) {
+        #[cfg(feature = "moli")]
+        _element.note_style_invalidation(RestyleHint::RESTYLE_DESCENDANTS);
+        #[cfg(not(feature = "moli"))]
         unreachable!("Unexpected recursion limit");
     }
 
