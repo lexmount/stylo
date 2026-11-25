@@ -3087,6 +3087,22 @@ const_assert!(std::mem::size_of::<longhands::${longhand.ident}::SpecifiedValue>(
 % endfor
 
 % if engine == "servo":
+% for group, inherited in [("inherited", True), ("reset", False)]:
+/// Compare computed values in the style structs belonging to this inheritance group.
+pub(crate) fn ${group}_style_structs_differ(old: &ComputedValues, new: &ComputedValues) -> bool {
+    % for style_struct in data.active_style_structs():
+    % if style_struct.inherited == inherited:
+    let old_struct = old.get_${style_struct.name_lower}();
+    let new_struct = new.get_${style_struct.name_lower}();
+    if !std::ptr::eq(old_struct, new_struct) && old_struct != new_struct {
+        return true;
+    }
+    % endif
+    % endfor
+    false
+}
+% endfor
+
 % for effect_name in ["repaint", "recalculate_overflow", "rebuild_stacking_context", "rebuild_box"]:
 pub(crate) fn restyle_damage_${effect_name} (old: &ComputedValues, new: &ComputedValues) -> bool {
     % for style_struct in data.active_style_structs():

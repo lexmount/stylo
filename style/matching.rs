@@ -18,9 +18,9 @@ use crate::dom::TElement;
 #[cfg(feature = "servo")]
 use crate::dom::TNode;
 use crate::invalidation::element::restyle_hints::RestyleHint;
-use crate::properties::longhands::display::computed_value::T as Display;
 use crate::properties::ComputedValues;
 use crate::properties::PropertyDeclarationBlock;
+use crate::properties::longhands::display::computed_value::T as Display;
 #[cfg(feature = "servo")]
 use crate::rule_tree::RuleCascadeFlags;
 use crate::rule_tree::{CascadeLevel, CascadeOrigin, StrongRuleNode};
@@ -56,6 +56,112 @@ pub enum StyleChange {
         /// Whether custom properties have changed.
         custom_properties_changed: bool,
     },
+}
+
+impl StyleDifference {
+    /// Returns the restyle work that this element's change requires on its children.
+    ///
+    /// Root-relative unit changes come from the resolver or the Device update
+    /// that adopted the new root style.
+    pub fn child_restyle_hint(
+        &self,
+        old_values: &ComputedValues,
+        new_values: &ComputedValues,
+        root_units_changed: bool,
+    ) -> RestyleHint {
+        let mut children_hint = RestyleHint::empty();
+        let old_font = old_values.get_font();
+        let new_font = new_values.get_font();
+        if root_units_changed
+            || old_font.clone_font_size() != new_font.clone_font_size()
+            || line_height_likely_changed(Some(old_values), new_values)
+            || !old_values.writing_mode_equals(new_values)
+        {
+            children_hint |= RestyleHint::RESTYLE_IF_AFFECTED_BY_WM_OR_ANCESTOR_FONT;
+        }
+
+        let old_container_type = old_values.clone_container_type();
+        let new_container_type = new_values.clone_container_type();
+        let contents_changed = old_values.is_display_contents() != new_values.is_display_contents();
+        // Gecko handles new size containers during layout. Servo embedders may
+        // resolve descendants using retained container sizes before layout runs.
+        if (old_container_type != new_container_type
+            && (cfg!(feature = "servo") || !new_container_type.is_size_container_type()))
+            || (contents_changed
+                && (cfg!(feature = "servo")
+                    || (old_container_type.is_size_container_type()
+                        && new_values.is_display_contents())))
+        {
+            children_hint |= RestyleHint::restyle_subtree();
+        }
+
+        #[cfg(feature = "servo")]
+        if new_container_type.is_size_container_type()
+            && (old_values.effective_zoom != new_values.effective_zoom
+                || (!std::ptr::eq(old_font, new_font) && old_font != new_font))
+        {
+            // Font-relative size queries may read this container's font
+            // across descendants that set their own font.
+            children_hint |= RestyleHint::RESTYLE_IF_AFFECTED_BY_WM_OR_ANCESTOR_FONT;
+        }
+
+        if old_values.flags.maybe_inherited() != new_values.flags.maybe_inherited() {
+            // Even if the styles are otherwise equal, we need to cascade the children in order to
+            // ensure the correct propagation of inherited computed value flags.
+            debug!(
+                " > flags changed: {:?} != {:?}",
+                old_values.flags, new_values.flags
+            );
+            children_hint |= RestyleHint::RECASCADE_SELF;
+        } else if old_values.effective_zoom != new_values.effective_zoom {
+            // Similarly, even if styles are equal, we need to propagate zoom changes.
+            debug!(
+                " > zoom changed: {:?} != {:?}",
+                old_values.effective_zoom, new_values.effective_zoom
+            );
+            children_hint |= RestyleHint::RECASCADE_SELF;
+        }
+
+        let StyleChange::Changed {
+            reset_only,
+            custom_properties_changed,
+        } = self.change
+        else {
+            return children_hint;
+        };
+
+        let new_container_name = new_values.clone_container_name();
+        if new_container_name != old_values.clone_container_name() {
+            // If we're becoming or stopped to become a named container, we need to potentially
+            // restyle children.
+            children_hint |= RestyleHint::RESTYLE_IF_AFFECTED_BY_NAMED_STYLE_CONTAINER;
+        } else if custom_properties_changed {
+            // Custom property changes affect style queries. How specifically depends on whether
+            // we're a named container (more expensive, need to check the subtree) or not.
+            children_hint |= if !new_container_name.is_none() {
+                RestyleHint::RESTYLE_IF_AFFECTED_BY_NAMED_STYLE_CONTAINER
+            } else {
+                RestyleHint::RESTYLE_IF_AFFECTED_BY_STYLE_QUERIES
+            };
+        }
+
+        if reset_only {
+            // If only reset properties changed, we _might_ need to unconditionally restyle, but
+            // most likely we can get away with stopping the cascade at the next level, if our
+            // children don't inherit reset properties.
+            children_hint |=
+                if need_to_unconditionally_recascade_for_reset_change(old_values, new_values) {
+                    RestyleHint::RECASCADE_SELF
+                } else {
+                    RestyleHint::RECASCADE_SELF_IF_INHERIT_RESET_STYLE
+                };
+        } else {
+            // If inherited properties changed, we need to cascade our children.
+            children_hint |= RestyleHint::RECASCADE_SELF;
+        }
+
+        children_hint
+    }
 }
 
 /// Determines which styles are being cascaded currently.
@@ -789,85 +895,6 @@ trait PrivateMatchMethods: TElement {
 
         changed_animations
     }
-
-    /// Computes and applies non-redundant damage.
-    fn accumulate_damage_for(
-        &self,
-        shared_context: &SharedStyleContext,
-        damage: &mut RestyleDamage,
-        old_values: &ComputedValues,
-        new_values: &ComputedValues,
-        pseudo: Option<&PseudoElement>,
-    ) -> RestyleHint {
-        debug!("accumulate_damage_for: {:?}", self);
-        debug_assert!(!shared_context
-            .traversal_flags
-            .contains(TraversalFlags::FinalAnimationTraversal));
-
-        let difference = self.compute_style_difference(old_values, new_values, pseudo);
-
-        *damage |= difference.damage;
-
-        debug!(" > style difference: {:?}", difference);
-
-        let mut children_hint = RestyleHint::empty();
-        if old_values.flags.maybe_inherited() != new_values.flags.maybe_inherited() {
-            // Even if the styles are otherwise equal, we need to cascade the children in order to
-            // ensure the correct propagation of inherited computed value flags.
-            debug!(
-                " > flags changed: {:?} != {:?}",
-                old_values.flags, new_values.flags
-            );
-            children_hint |= RestyleHint::RECASCADE_SELF;
-        } else if old_values.effective_zoom != new_values.effective_zoom {
-            // Similarly, even if styles are equal, we need to propagate zoom changes.
-            debug!(
-                " > zoom changed: {:?} != {:?}",
-                old_values.effective_zoom, new_values.effective_zoom
-            );
-            children_hint |= RestyleHint::RECASCADE_SELF;
-        }
-
-        let StyleChange::Changed {
-            reset_only,
-            custom_properties_changed,
-        } = difference.change
-        else {
-            return children_hint;
-        };
-
-        let new_container_name = new_values.clone_container_name();
-        if new_container_name != old_values.clone_container_name() {
-            // If we're becoming or stopped to become a named container, we need to potentially
-            // restyle children.
-            children_hint |= RestyleHint::RESTYLE_IF_AFFECTED_BY_NAMED_STYLE_CONTAINER;
-        } else if custom_properties_changed {
-            // Custom property changes affect style queries. How specifically depends on whether
-            // we're a named container (more expensive, need to check the subtree) or not.
-            children_hint |= if !new_container_name.is_none() {
-                RestyleHint::RESTYLE_IF_AFFECTED_BY_NAMED_STYLE_CONTAINER
-            } else {
-                RestyleHint::RESTYLE_IF_AFFECTED_BY_STYLE_QUERIES
-            };
-        }
-
-        if reset_only {
-            // If only reset properties changed, we _might_ need to unconditionally restyle, but
-            // most likely we can get away with stopping the cascade at the next level, if our
-            // children don't inherit reset properties.
-            children_hint |=
-                if need_to_unconditionally_recascade_for_reset_change(old_values, new_values) {
-                    RestyleHint::RECASCADE_SELF
-                } else {
-                    RestyleHint::RECASCADE_SELF_IF_INHERIT_RESET_STYLE
-                };
-        } else {
-            // If inherited properties changed, we need to cascade our children.
-            children_hint |= RestyleHint::RECASCADE_SELF;
-        }
-
-        children_hint
-    }
 }
 
 /// Whether we need to recascade children for a change in non-inherited properties.
@@ -990,25 +1017,18 @@ pub trait MatchMethods: TElement {
             important_rules_changed,
         );
 
-        let root_font_relative_state_changed = new_styles.primary.root_font_relative_state_changed;
+        let root_font_relative_state_changed = new_styles.root_font_relative_state_changed();
 
         // First of all, update the styles.
         let old_styles = data.set_styles(new_styles);
 
         let new_primary_style = data.styles.primary.as_ref().unwrap();
 
-        let mut child_restyle_hint = RestyleHint::empty();
         let is_root = new_primary_style
             .flags
             .contains(ComputedValueFlags::IS_ROOT_ELEMENT_STYLE);
 
         let device = context.shared.stylist.device();
-        let new_font_size = new_primary_style.get_font().clone_font_size();
-        let new_container_type = new_primary_style.clone_container_type();
-
-        let old_style = old_styles.primary.as_ref();
-        let old_font_size = old_style.map(|s| s.get_font().clone_font_size());
-        let font_size_changed = old_font_size.is_none_or(|fs| fs != new_font_size);
 
         // Preserve changes published by the resolver before cascading pseudos.
         // A change in the bases still invalidates dependent descendants.
@@ -1019,13 +1039,6 @@ pub trait MatchMethods: TElement {
         } else {
             false
         };
-
-        if root_units_changed
-            || font_size_changed
-            || Self::line_height_likely_changed(old_style, new_primary_style)
-        {
-            child_restyle_hint |= RestyleHint::RESTYLE_IF_AFFECTED_BY_WM_OR_ANCESTOR_FONT;
-        }
 
         if context.shared.stylist.quirks_mode() == QuirksMode::Quirks
             && self.is_html_document_body_element()
@@ -1056,34 +1069,12 @@ pub trait MatchMethods: TElement {
             None => return RestyleHint::RECASCADE_SELF,
         };
 
-        // Check for changes in writing mode here because we don't care
-        // if the old style didn't exist because that should be resolved
-        // when computing the style from scratch.
-        if !old_primary_style.writing_mode_equals(new_primary_style) {
-            child_restyle_hint |= RestyleHint::RESTYLE_IF_AFFECTED_BY_WM_OR_ANCESTOR_FONT;
-        }
-
-        let old_container_type = old_primary_style.clone_container_type();
-        if old_container_type != new_container_type && !new_container_type.is_size_container_type()
-        {
-            // Stopped being a size container. Re-evaluate container queries and units on all our descendants.
-            // Changes into and between different size containment is handled in `UpdateContainerQueryStyles`.
-            child_restyle_hint |= RestyleHint::restyle_subtree();
-        } else if old_container_type.is_size_container_type()
-            && !old_primary_style.is_display_contents()
-            && new_primary_style.is_display_contents()
-        {
-            // Also re-evaluate when a container gets 'display: contents', since size queries will now evaluate to unknown.
-            // Other displays like 'inline' will keep generating a box, so they are handled in `UpdateContainerQueryStyles`.
-            child_restyle_hint |= RestyleHint::restyle_subtree();
-        }
-
-        child_restyle_hint |= self.accumulate_damage_for(
-            context.shared,
-            &mut data.damage,
+        let difference = self.compute_style_difference(&old_primary_style, new_primary_style, None);
+        data.damage |= difference.damage;
+        let child_restyle_hint = difference.child_restyle_hint(
             &old_primary_style,
             new_primary_style,
-            None,
+            root_units_changed,
         );
 
         if data.styles.pseudos.is_empty() && old_styles.pseudos.is_empty() {
@@ -1100,13 +1091,13 @@ pub trait MatchMethods: TElement {
         for (i, (old, new)) in pseudo_styles.enumerate() {
             match (old, new) {
                 (Some(old), Some(new)) => {
-                    self.accumulate_damage_for(
-                        context.shared,
-                        &mut data.damage,
-                        old,
-                        new,
-                        Some(&PseudoElement::from_eager_index(i)),
-                    );
+                    data.damage |= self
+                        .compute_style_difference(
+                            old,
+                            new,
+                            Some(&PseudoElement::from_eager_index(i)),
+                        )
+                        .damage;
                 },
                 (&None, &None) => {},
                 _ => {

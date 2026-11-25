@@ -13,11 +13,12 @@ use crate::computed_values::transform_style::T as TransformStyle;
 use crate::dom::TElement;
 use crate::matching::{StyleChange, StyleDifference};
 use crate::properties::{
+    ComputedValues, inherited_style_structs_differ, reset_style_structs_differ,
     restyle_damage_rebuild_box, restyle_damage_rebuild_stacking_context,
-    restyle_damage_recalculate_overflow, restyle_damage_repaint, style_structs, ComputedValues,
+    restyle_damage_recalculate_overflow, restyle_damage_repaint, style_structs,
 };
-use crate::values::computed::basic_shape::ClipPath;
 use crate::values::computed::Perspective;
+use crate::values::computed::basic_shape::ClipPath;
 use crate::values::generics::transform::{GenericRotate, GenericScale, GenericTranslate};
 use std::fmt;
 
@@ -71,36 +72,17 @@ impl ServoRestyleDamage {
             damage |= E::compute_layout_damage(old, new);
         }
 
-        let mut any_style_changed = !damage.is_empty();
-        // FIXME(emilio): Differentiate between reset and inherited
-        // properties here, and set `reset_only` appropriately so the
-        // optimization to skip the cascade in those cases applies.
-        let mut reset_only = !any_style_changed;
-
-        let old_custom_props = old.custom_properties();
-        let new_custom_props = new.custom_properties();
-        let mut custom_properties_changed = false;
-        if old_custom_props.inherited != new_custom_props.inherited {
-            any_style_changed = true;
-            custom_properties_changed = true;
-            reset_only = false;
-        } else if old_custom_props.non_inherited != new_custom_props.non_inherited {
-            any_style_changed = true;
-            custom_properties_changed = true;
-        };
-        if custom_properties_changed {
+        let change = compute_style_change(old, new);
+        if matches!(
+            change,
+            StyleChange::Changed {
+                custom_properties_changed: true,
+                ..
+            }
+        ) {
             // Paint worklets may depend on custom properties, so if they have changed we should repaint.
             damage.insert(ServoRestyleDamage::REPAINT);
         }
-
-        let change = if any_style_changed {
-            StyleChange::Changed {
-                reset_only,
-                custom_properties_changed,
-            }
-        } else {
-            StyleChange::Unchanged
-        };
 
         StyleDifference { damage, change }
     }
@@ -110,6 +92,93 @@ impl ServoRestyleDamage {
         // There's no way of knowing what kind of damage system the embedder will use, but part of
         // this interface is that a fully saturated restyle damage means to rebuild everything.
         ServoRestyleDamage::from_bits_retain(<ServoRestyleDamage as Flags>::Bits::MAX)
+    }
+}
+
+fn compute_style_change(old: &ComputedValues, new: &ComputedValues) -> StyleChange {
+    let old_custom_props = old.custom_properties();
+    let new_custom_props = new.custom_properties();
+    let inherited_custom_properties_changed =
+        old_custom_props.inherited != new_custom_props.inherited;
+    let custom_properties_changed = inherited_custom_properties_changed
+        || old_custom_props.non_inherited != new_custom_props.non_inherited;
+    let inherited_changed =
+        inherited_custom_properties_changed || inherited_style_structs_differ(old, new);
+
+    if inherited_changed || custom_properties_changed || reset_style_structs_differ(old, new) {
+        StyleChange::Changed {
+            reset_only: !inherited_changed,
+            custom_properties_changed,
+        }
+    } else {
+        StyleChange::Unchanged
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::computed_values::visibility::T as Visibility;
+    use crate::invalidation::element::restyle_hints::RestyleHint;
+    use crate::properties::longhands::transition_duration;
+    use crate::values::computed::Time;
+    use servo_arc::Arc;
+
+    fn initial_style() -> Arc<ComputedValues> {
+        ComputedValues::initial_values_with_font_override(style_structs::Font::initial_values())
+    }
+
+    #[test]
+    fn reset_change_only_recascades_explicit_inheritance() {
+        let old = initial_style();
+        let mut new = old.clone();
+        let mut durations = transition_duration::get_initial_value();
+        durations.0[0] = Time::from_seconds(2.);
+        Arc::make_mut(&mut new)
+            .mutate_ui()
+            .set_transition_duration(durations);
+
+        let difference = StyleDifference {
+            damage: compute_damage(&old, &new),
+            change: compute_style_change(&old, &new),
+        };
+        assert!(difference.damage.contains(ServoRestyleDamage::RELAYOUT));
+        assert!(matches!(
+            difference.change,
+            StyleChange::Changed {
+                reset_only: true,
+                ..
+            }
+        ));
+        let hint = difference.child_restyle_hint(&old, &new, false);
+        assert!(hint.contains(RestyleHint::RECASCADE_SELF_IF_INHERIT_RESET_STYLE));
+        assert!(!hint.contains(RestyleHint::RECASCADE_SELF));
+    }
+
+    #[test]
+    fn inherited_change_recascades_children() {
+        let old = initial_style();
+        let mut new = old.clone();
+        Arc::make_mut(&mut new)
+            .mutate_inherited_box()
+            .set_visibility(Visibility::Hidden);
+
+        let difference = StyleDifference {
+            damage: compute_damage(&old, &new),
+            change: compute_style_change(&old, &new),
+        };
+        assert!(matches!(
+            difference.change,
+            StyleChange::Changed {
+                reset_only: false,
+                ..
+            }
+        ));
+        assert!(
+            difference
+                .child_restyle_hint(&old, &new, false)
+                .contains(RestyleHint::RECASCADE_SELF)
+        );
     }
 }
 

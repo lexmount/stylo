@@ -83,6 +83,13 @@ pub struct ResolvedElementStyles {
 }
 
 impl ResolvedElementStyles {
+    /// Whether the resolver's publication changed the root-relative unit bases.
+    ///
+    /// Returns `None` when the resolver did not publish a root style.
+    pub fn root_font_relative_state_changed(&self) -> Option<bool> {
+        self.primary.root_font_relative_state_changed
+    }
+
     /// Convenience accessor for the primary style.
     pub fn primary_style(&self) -> &Arc<ComputedValues> {
         &self.primary.style.0
