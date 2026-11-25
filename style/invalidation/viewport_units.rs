@@ -34,22 +34,20 @@ where
     }
 
     let usage = data.styles.viewport_unit_usage();
-    let uses_viewport_units = usage != ViewportUnitUsage::None;
+    let hint = match usage {
+        ViewportUnitUsage::None => RestyleHint::empty(),
+        ViewportUnitUsage::FromQuery => RestyleHint::RESTYLE_SELF,
+        ViewportUnitUsage::FromDeclaration => RestyleHint::RECASCADE_SELF,
+    };
+    let uses_viewport_units = !hint.is_empty();
     if uses_viewport_units {
         debug!(
             "invalidate_recursively: {:?} uses viewport units {:?}",
             element, usage
         );
-    }
-
-    match usage {
-        ViewportUnitUsage::None => {},
-        ViewportUnitUsage::FromQuery => {
-            data.hint.insert(RestyleHint::RESTYLE_SELF);
-        },
-        ViewportUnitUsage::FromDeclaration => {
-            data.hint.insert(RestyleHint::RECASCADE_SELF);
-        },
+        data.hint.insert(hint);
+        #[cfg(feature = "moli")]
+        element.note_style_invalidation(hint);
     }
 
     let mut any_children_invalid = false;

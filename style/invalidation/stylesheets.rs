@@ -266,7 +266,10 @@ impl StylesheetInvalidationSet {
 
             if self.style_fully_invalid {
                 debug!("process_invalidations: fully_invalid({:?})", root);
-                data.hint.insert(RestyleHint::restyle_subtree());
+                let hint = RestyleHint::restyle_subtree();
+                data.hint.insert(hint);
+                #[cfg(feature = "moli")]
+                root.note_style_invalidation(hint);
                 return true;
             }
         }
@@ -324,13 +327,18 @@ impl StylesheetInvalidationSet {
                     element
                 );
                 data.hint.insert(RestyleHint::RESTYLE_SELF);
+                #[cfg(feature = "moli")]
+                element.note_style_invalidation(RestyleHint::RESTYLE_SELF);
             },
             InvalidationKind::Scope => {
                 debug!(
                     "process_invalidations_in_subtree: {:?} matched subtree",
                     element
                 );
-                data.hint.insert(RestyleHint::restyle_subtree());
+                let hint = RestyleHint::restyle_subtree();
+                data.hint.insert(hint);
+                #[cfg(feature = "moli")]
+                element.note_style_invalidation(hint);
                 return true;
             },
         }
