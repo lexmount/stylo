@@ -156,6 +156,26 @@ mod tests {
     }
 
     #[test]
+    fn moli_border_color_only_repaints() {
+        let old = initial_style();
+        let mut new = old.clone();
+        Arc::make_mut(&mut new)
+            .mutate_border()
+            .set_border_top_color(crate::values::computed::Color::WHITE);
+        let expected = if cfg!(feature = "moli") {
+            ServoRestyleDamage::REPAINT
+        } else {
+            ServoRestyleDamage::RELAYOUT
+        };
+        assert_eq!(compute_damage(&old, &new), expected);
+
+        Arc::make_mut(&mut new)
+            .mutate_border()
+            .set_border_top_style(crate::computed_values::border_top_style::T::Solid);
+        assert_eq!(compute_damage(&old, &new), ServoRestyleDamage::RELAYOUT);
+    }
+
+    #[test]
     fn inherited_change_recascades_children() {
         let old = initial_style();
         let mut new = old.clone();

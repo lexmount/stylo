@@ -438,6 +438,7 @@ class Longhand(Property):
         ignored_when_colors_disabled=False,
         vector=None,
         servo_restyle_damage="rebuild_box",
+        moli_restyle_damage=None,
         affects=None,
     ):
         Property.__init__(
@@ -493,6 +494,7 @@ class Longhand(Property):
 
         # See compute_damage for the various values this can take
         self.servo_restyle_damage = servo_restyle_damage
+        self.moli_restyle_damage = moli_restyle_damage or servo_restyle_damage
 
     def affects_flags(self):
         # Layout is the stronger hint. This property animation affects layout

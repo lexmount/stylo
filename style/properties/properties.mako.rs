@@ -3106,15 +3106,29 @@ pub(crate) fn ${group}_style_structs_differ(old: &ComputedValues, new: &Computed
 % for effect_name in ["repaint", "recalculate_overflow", "rebuild_stacking_context", "rebuild_box"]:
 pub(crate) fn restyle_damage_${effect_name} (old: &ComputedValues, new: &ComputedValues) -> bool {
     % for style_struct in data.active_style_structs():
-        <% longhands_affected = [effect_name in longhand.servo_restyle_damage.split() for longhand in style_struct.longhands if not longhand.logical] %>
-        % if any(longhands_affected):
+        <%
+        longhands_affected = [
+            (longhand, effect_name in longhand.servo_restyle_damage.split(),
+             effect_name in longhand.moli_restyle_damage.split())
+            for longhand in style_struct.longhands if not longhand.logical
+        ]
+        %>
+        % if any(servo or moli for _, servo, moli in longhands_affected):
         let old_${style_struct.name_lower} = old.get_${style_struct.name_lower}();
         let new_${style_struct.name_lower} = new.get_${style_struct.name_lower}();
         if !std::ptr::eq(old_${style_struct.name_lower}, new_${style_struct.name_lower}) {
             if
-            % for longhand in style_struct.longhands:
-            % if effect_name in longhand.servo_restyle_damage.split() and not longhand.logical:
-                old_${style_struct.name_lower}.${longhand.ident} != new_${style_struct.name_lower}.${longhand.ident} ||
+            % for longhand, servo, moli in longhands_affected:
+            % if servo or moli:
+                <%
+                member = f"{style_struct.name_lower}.{longhand.ident}"
+                changed = f"old_{member} != new_{member}"
+                if servo != moli:
+                    feature = 'cfg!(feature = "moli")'
+                    enabled = f"!{feature}" if servo else feature
+                    changed = f"({enabled} && {changed})"
+                %>
+                ${changed} ||
             % endif
             % endfor
             false {
