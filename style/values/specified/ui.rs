@@ -288,7 +288,6 @@ pub enum PointerEvents {
     Fill,
     #[cfg(feature = "gecko")]
     Stroke,
-    #[cfg(feature = "gecko")]
     All,
 }
 

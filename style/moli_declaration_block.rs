@@ -408,6 +408,12 @@ mod tests {
     }
 
     #[test]
+    fn declaration_block_accepts_pointer_events_all() {
+        let block = parse_declaration_block("pointer-events: all");
+        assert_eq!(block.property_value("pointer-events").as_deref(), Some("all"));
+    }
+
+    #[test]
     fn trig_math_preserves_percentage_type_instead_of_accepting_number_arguments() {
         for value in [
             "calc(1px * pow(tan(atan2(50%, 1px)), 1))",
