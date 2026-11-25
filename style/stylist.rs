@@ -3807,6 +3807,16 @@ impl CascadeData {
         self.nth_of_custom_state_dependencies.contains(state)
     }
 
+    /// Whether changes to selector membership can affect sibling positions.
+    #[cfg(feature = "moli")]
+    pub fn has_nth_of_dependencies(&self) -> bool {
+        !self.nth_of_mapped_ids.is_empty()
+            || !self.nth_of_class_dependencies.is_empty()
+            || !self.nth_of_attribute_dependencies.is_empty()
+            || !self.nth_of_custom_state_dependencies.is_empty()
+            || !self.nth_of_state_dependencies.is_empty()
+    }
+
     /// Returns whether the given ElementState bit is relied upon by a selector
     /// of some rule in the selector list of :nth-child(... of <selector list>).
     #[inline]

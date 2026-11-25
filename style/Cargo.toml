@@ -20,6 +20,7 @@ doctest = false
 
 [features]
 default = ["servo"]
+moli = ["servo"]
 gecko = [
     "bindgen",
     "malloc_size_of/gecko",

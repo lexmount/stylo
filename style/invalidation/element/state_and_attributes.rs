@@ -141,6 +141,20 @@ pub fn should_process_descendants(data: &ElementData) -> bool {
     !data.styles.is_display_none() && !data.hint.contains(RestyleHint::RESTYLE_DESCENDANTS)
 }
 
+/// Uses the ordinary traversal boundary. A demand-driven host can retain
+/// queried styles under that boundary and invalidates them on its next read.
+pub(super) fn should_process_element_descendants<E: TElement>(
+    _element: E,
+    data: Option<&ElementData>,
+) -> bool {
+    #[cfg(feature = "moli")]
+    if data.is_none_or(|data| !data.has_styles() || data.styles.is_display_none()) {
+        _element.note_style_invalidation(RestyleHint::RESTYLE_DESCENDANTS);
+        return false;
+    }
+    data.is_some_and(should_process_descendants)
+}
+
 /// Propagates the bits after invalidating a descendant child.
 pub fn propagate_dirty_bit_up_to<E>(ancestor: E, child: E)
 where
@@ -189,6 +203,8 @@ where
         None => return false,
     };
     data.hint.insert(RestyleHint::RESTYLE_SELF);
+    #[cfg(feature = "moli")]
+    element.note_style_invalidation(RestyleHint::RESTYLE_SELF);
     true
 }
 
@@ -410,12 +426,17 @@ where
         //
         // We don't look at slotted_descendants because those don't propagate
         // down more than one level anyway.
+        let mut hint = RestyleHint::empty();
         if descendant_invalidations.dom_descendants.len() > 150 {
-            self.data.hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
+            hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
         }
-
         if invalidated_self {
-            self.data.hint.insert(RestyleHint::RESTYLE_SELF);
+            hint.insert(RestyleHint::RESTYLE_SELF);
+        }
+        self.data.hint.insert(hint);
+        #[cfg(feature = "moli")]
+        if !hint.is_empty() {
+            element.note_style_invalidation(hint);
         }
 
         invalidated_self
@@ -423,16 +444,15 @@ where
 
     fn should_process_descendants(&mut self, element: E) -> bool {
         if element == self.element {
-            return should_process_descendants(self.data);
+            return should_process_element_descendants(element, Some(self.data));
         }
 
-        match element.borrow_data() {
-            Some(d) => should_process_descendants(&d),
-            None => false,
-        }
+        should_process_element_descendants(element, element.borrow_data().as_deref())
     }
 
     fn recursion_limit_exceeded(&mut self, element: E) {
+        #[cfg(feature = "moli")]
+        element.note_style_invalidation(RestyleHint::RESTYLE_DESCENDANTS);
         if element == self.element {
             self.data.hint.insert(RestyleHint::RESTYLE_DESCENDANTS);
             return;

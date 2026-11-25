@@ -809,6 +809,15 @@ pub trait TElement:
     /// triggering since their styles are resolved lazily during painting.
     fn note_highlight_pseudo_style_invalidated(&self) {}
 
+    /// Records invalidation for a demand-driven embedder. An element's style
+    /// data can be borrowed when this is called, so only record the work here.
+    #[cfg(feature = "moli")]
+    fn note_style_invalidation(
+        &self,
+        _hint: crate::invalidation::element::restyle_hints::RestyleHint,
+    ) {
+    }
+
     /// The shadow root this element is a host of.
     fn shadow_root(&self) -> Option<<Self::ConcreteNode as TNode>::ConcreteShadowRoot>;
 
