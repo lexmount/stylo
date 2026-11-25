@@ -18,9 +18,9 @@ use crate::dom::TElement;
 #[cfg(feature = "servo")]
 use crate::dom::TNode;
 use crate::invalidation::element::restyle_hints::RestyleHint;
+use crate::properties::longhands::display::computed_value::T as Display;
 use crate::properties::ComputedValues;
 use crate::properties::PropertyDeclarationBlock;
-use crate::properties::longhands::display::computed_value::T as Display;
 #[cfg(feature = "servo")]
 use crate::rule_tree::RuleCascadeFlags;
 use crate::rule_tree::{CascadeLevel, CascadeOrigin, StrongRuleNode};
@@ -1010,12 +1010,21 @@ pub trait MatchMethods: TElement {
         mut new_styles: ResolvedElementStyles,
         important_rules_changed: bool,
     ) -> RestyleHint {
-        self.process_animations(
-            context,
-            &mut data.styles,
-            &mut new_styles,
-            important_rules_changed,
-        );
+        #[cfg(feature = "servo")]
+        let update_animations = !context
+            .shared
+            .traversal_flags
+            .contains(TraversalFlags::SkipAnimationUpdates);
+        #[cfg(feature = "gecko")]
+        let update_animations = true;
+        if update_animations {
+            self.process_animations(
+                context,
+                &mut data.styles,
+                &mut new_styles,
+                important_rules_changed,
+            );
+        }
 
         let root_font_relative_state_changed = new_styles.root_font_relative_state_changed();
 

@@ -28,6 +28,10 @@ bitflags! {
         /// unconditionally tick and process them.
         const FlushThrottledAnimations = 1 << 8;
 
+        /// The embedder owns the animation timeline and resolves base styles here.
+        #[cfg(feature = "servo")]
+        const SkipAnimationUpdates = 1 << 9;
+
     }
 }
 
