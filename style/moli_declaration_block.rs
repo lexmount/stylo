@@ -546,8 +546,6 @@ mod tests {
     fn parsed_values_match_declaration_block_serialization() {
         with_detached_style_context(|context| {
             for (name, value) in [
-                ("all", "inherit"),
-                ("all", "var(--shared, revert-layer)"),
                 ("width", "var(--width, 2px)"),
                 ("padding", "1px 2px 3px 4px"),
                 ("margin", "var(--margin, 1px 2px)"),
@@ -570,6 +568,32 @@ mod tests {
                         actual.as_deref(),
                         Some(expected.as_str()),
                         "{name}: {value}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn parsed_all_serializes_its_compact_value() {
+        with_detached_style_context(|context| {
+            // Expanding all into a block and reading it back runs two passes
+            // over enabled longhands. Other unit tests can enable preferences
+            // between those passes. Its own specified value is independent of
+            // which longhands are currently enabled.
+            for (value, unresolved) in [("inherit", false), ("var(--shared, revert-layer)", true)] {
+                for priority in [false, true] {
+                    let parsed =
+                        ParsedCssomProperty::parse("all", value, priority, context).unwrap();
+                    assert_eq!(parsed.value().as_deref(), Some(value));
+                    assert_eq!(parsed.has_unresolved_value(), unresolved);
+                    assert_eq!(
+                        parsed.entries().unwrap(),
+                        [CssDeclarationEntry {
+                            name: "all".to_owned(),
+                            value: value.to_owned(),
+                            priority,
+                        }],
                     );
                 }
             }
