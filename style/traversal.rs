@@ -377,7 +377,7 @@ pub fn recalc_style_at<E, D, F>(
 
     // Compute style for this element if necessary.
     if let Some(restyle_kind) = restyle_kind {
-        child_restyle_hint = compute_style(context, element, data, restyle_kind);
+        child_restyle_hint = restyle_element(context, element, data, restyle_kind);
 
         if !element.matches_user_and_content_rules() {
             // We must always cascade native anonymous subtrees, since they
@@ -483,7 +483,12 @@ where
     }
 }
 
-fn compute_style<E>(
+/// Apply the restyle kind selected by `ElementData::restyle_kind` to one element.
+///
+/// The caller resolves the element's ancestors first and sets the current DOM
+/// depth for selector matching. The returned hint describes work for the
+/// children. The caller owns hint propagation, traversal and damage consumption.
+pub fn restyle_element<E>(
     context: &mut StyleContext<E>,
     element: E,
     data: &mut ElementData,
