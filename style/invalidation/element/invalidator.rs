@@ -15,7 +15,7 @@ use selectors::matching::matches_compound_selector_from;
 use selectors::matching::{CompoundSelectorMatchingResult, MatchingContext};
 use selectors::parser::{Combinator, Component, Selector, SelectorVisitor};
 use selectors::{OpaqueElement, SelectorImpl};
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::fmt;
 use std::fmt::Write;
 
@@ -985,8 +985,7 @@ where
         debug!(" > {:?}", invalidations);
 
         let should_process = self.processor.should_process_descendants(self.element);
-
-        if !should_process {
+        if !should_process && !cfg!(feature = "moli") {
             return false;
         }
 
@@ -999,7 +998,12 @@ where
 
         let mut any_descendant = false;
 
-        any_descendant |= self.invalidate_non_slotted_descendants(&invalidations.dom_descendants);
+        if should_process {
+            any_descendant |=
+                self.invalidate_non_slotted_descendants(&invalidations.dom_descendants);
+        }
+        // The host may retain observed parts and assigned nodes even when
+        // the originating element's ordinary DOM descendants are pruned.
         any_descendant |= self.invalidate_slotted_elements(&invalidations.slotted_descendants);
         any_descendant |= self.invalidate_parts(&invalidations.parts);
 
@@ -1250,7 +1254,7 @@ where
                 return ProcessInvalidationResult {
                     invalidated_self: false,
                     matched: false,
-                }
+                };
             },
             CompoundSelectorMatchingResult::FullyMatched => self.handle_fully_matched(invalidation),
             CompoundSelectorMatchingResult::Matched {

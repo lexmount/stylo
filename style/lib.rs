@@ -88,6 +88,10 @@ pub mod font_metrics;
 pub mod gecko_bindings;
 pub mod global_style_data;
 pub mod invalidation;
+#[allow(missing_docs)] // TODO.
+pub mod logical_geometry;
+pub mod matching;
+pub mod media_queries;
 /// Moli-facing CSS declaration block hooks.
 #[cfg(feature = "servo")]
 #[allow(missing_docs)]
@@ -96,8 +100,6 @@ pub mod moli_declaration_block;
 #[cfg(feature = "servo")]
 #[allow(missing_docs)]
 pub mod moli_font_face;
-/// Moli-facing selector invalidation hooks.
-pub mod moli_invalidation;
 /// Moli-facing numeric value parser and used-value resolver hooks.
 #[cfg(feature = "servo")]
 #[allow(missing_docs)]
@@ -110,10 +112,6 @@ pub mod moli_rule_tree;
 #[cfg(feature = "servo")]
 #[allow(missing_docs)]
 pub mod moli_transform;
-#[allow(missing_docs)] // TODO.
-pub mod logical_geometry;
-pub mod matching;
-pub mod media_queries;
 pub mod parallel;
 pub mod parser;
 pub mod piecewise_linear;

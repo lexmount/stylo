@@ -1166,8 +1166,15 @@ impl ElementSnapshot for ServoElementSnapshot {
             })
     }
 
-    fn imported_part(&self, _: &AtomIdent) -> Option<AtomIdent> {
-        None
+    fn imported_part(&self, name: &AtomIdent) -> Option<AtomIdent> {
+        let AttrValue::ShadowParts(_, parts) =
+            self.get_attr(&ns!(), &local_name!("exportparts"))?
+        else {
+            return None;
+        };
+        parts
+            .imported_part(&name.0)
+            .map(|name| AtomIdent::from(name.as_ref()))
     }
 
     fn has_class(&self, name: &AtomIdent, case_sensitivity: CaseSensitivity) -> bool {
