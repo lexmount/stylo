@@ -913,13 +913,14 @@ where
                     ) {
                         return;
                     }
-                    if let Some(e) = par.prev_sibling_element() {
-                        if !Self::in_search_direction(
-                            &e,
+                    // A missing sibling search path at this level does not
+                    // rule out an anchor next to a higher ancestor.
+                    if let Some(e) = par.prev_sibling_element().filter(|sibling| {
+                        Self::in_search_direction(
+                            sibling,
                             ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING,
-                        ) {
-                            return;
-                        }
+                        )
+                    }) {
                         self.handle_anchor(e, invalidation.dependency, invalidation.host);
                     }
                     parent = parent_for(par);
@@ -953,7 +954,7 @@ where
                             &sib,
                             ElementSelectorFlags::RELATIVE_SELECTOR_SEARCH_DIRECTION_SIBLING,
                         ) {
-                            return;
+                            break;
                         }
                         self.handle_anchor(sib, invalidation.dependency, invalidation.host);
                         sibling = sib.prev_sibling_element();
