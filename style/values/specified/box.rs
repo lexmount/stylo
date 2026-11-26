@@ -396,14 +396,16 @@ impl Display {
         Display::Inline
     }
 
-    /// Returns whether this `display` value is the display of a flex or
-    /// grid container.
+    /// Returns whether this `display` value produces a flex or grid item
+    /// container, including legacy WebKit boxes in Servo.
     ///
     /// This is used to implement various style fixups.
     pub fn is_item_container(&self) -> bool {
         match self.inside() {
             DisplayInside::Flex => true,
             DisplayInside::Grid => true,
+            #[cfg(feature = "servo")]
+            DisplayInside::WebkitBox => true,
             _ => false,
         }
     }
