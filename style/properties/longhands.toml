@@ -105,6 +105,16 @@ gecko_pref = "layout.css.line-clamp.enabled"
 gecko_ffi_name = "mWebkitLineClamp"
 spec = "https://drafts.csswg.org/css-overflow-4/#propdef-line-clamp"
 affects = "layout"
+servo_restyle_damage = "rebuild_box"
+
+[-webkit-box-orient]
+struct = "box"
+engine = "servo"
+spec = "https://drafts.csswg.org/css-overflow-4/#webkit-line-clamp"
+animation_type = "discrete"
+affects = "layout"
+servo_restyle_damage = "rebuild_box"
+keyword = { values = ["horizontal", "vertical", "inline-axis", "block-axis"] }
 
 [-x-lang]
 type = "XLang"

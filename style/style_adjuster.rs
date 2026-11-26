@@ -161,9 +161,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
     /// This makes the element not be a flex container, with all that it
     /// implies, but it should be safe. It matches blink, see
     /// https://bugzilla.mozilla.org/show_bug.cgi?id=1786147#c10
-    #[cfg(feature = "gecko")]
     fn adjust_for_webkit_line_clamp(&mut self) {
-        use crate::properties::longhands::_moz_box_orient::computed_value::T as BoxOrient;
         use crate::values::specified::box_::{DisplayInside, DisplayOutside};
         let box_style = self.style.get_box();
         let line_clamp = box_style.clone_line_clamp();
@@ -172,9 +170,23 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         }
 
         let disp = box_style.clone_display();
-        if disp.inside() != DisplayInside::WebkitBox
-            || self.style.get_xul().clone__moz_box_orient() != BoxOrient::Vertical
-        {
+        if disp.inside() != DisplayInside::WebkitBox {
+            return;
+        }
+        #[cfg(feature = "gecko")]
+        let vertical = {
+            use crate::properties::longhands::_moz_box_orient::computed_value::T as BoxOrient;
+            self.style.get_xul().clone__moz_box_orient() == BoxOrient::Vertical
+        };
+        #[cfg(feature = "servo")]
+        let vertical = {
+            use crate::properties::longhands::_webkit_box_orient::computed_value::T as BoxOrient;
+            matches!(
+                box_style.clone__webkit_box_orient(),
+                BoxOrient::Vertical | BoxOrient::BlockAxis
+            )
+        };
+        if !vertical {
             return;
         }
         let new_display = if disp.outside() == DisplayOutside::Block {
@@ -1061,7 +1073,6 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         }
         self.adjust_for_top_layer();
         self.blockify_if_necessary(layout_parent_style, element);
-        #[cfg(feature = "gecko")]
         self.adjust_for_webkit_line_clamp();
         self.adjust_for_position();
         self.adjust_for_overflow();
